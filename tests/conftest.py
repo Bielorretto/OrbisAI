@@ -11,6 +11,7 @@ os.environ["SCHEDULER_ENABLED"] = "false"
 import pytest  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
+from app import clock  # noqa: E402
 from app.db import SessionLocal  # noqa: E402
 from app.models import Matter, Task, User  # noqa: E402
 from app.seed import reset_database  # noqa: E402
@@ -29,9 +30,10 @@ def people(db):
     return {u.name: u for u in db.scalars(select(User))}
 
 
+def dossier(db, n: int) -> Matter:
+    """Dossier par son n° dans le tableau des dossiers du cabinet."""
+    return db.scalars(select(Matter).where(Matter.reference == f"{clock.now(db).year}-{n:03d}")).one()
+
+
 def task_by_title(db, start: str) -> Task:
     return db.scalars(select(Task).where(Task.title.startswith(start))).one()
-
-
-def matter(db, reference: str) -> Matter:
-    return db.scalars(select(Matter).where(Matter.reference == reference)).one()

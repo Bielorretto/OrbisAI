@@ -12,7 +12,7 @@ from sqlalchemy import inspect
 from app import config
 from app.db import Base, engine
 from app.routes import billing, matters, pages, tasks
-from app.routes.common import Forbidden, LoginRequired, redirect
+from app.routes.common import Forbidden, LoginRequired, redirect, request_token, with_params
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s : %(message)s")
 
@@ -49,12 +49,23 @@ async def _scheduler():
     await loop()
 
 
-app = FastAPI(title="Loickaton", lifespan=lifespan)
+app = FastAPI(title="OrbisAI", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 app.include_router(pages.router)
 app.include_router(matters.router)
 app.include_router(tasks.router)
 app.include_router(billing.router)
+
+
+@app.middleware("http")
+async def keep_tab_identity(request: Request, call_next):
+    """Les redirections internes conservent le jeton d'identité de l'onglet."""
+    response = await call_next(request)
+    token = request_token(request)
+    location = response.headers.get("location", "")
+    if token and location.startswith("/") and not location.startswith("/login") and "as=" not in location:
+        response.headers["location"] = with_params(location, **{"as": token})
+    return response
 
 
 @app.exception_handler(LoginRequired)

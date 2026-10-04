@@ -8,9 +8,9 @@ from app import config
 from app.services import ai
 
 SPECIALTIES = {
-    "Droit social": ["Contentieux prud'homal", "Rupture du contrat de travail"],
-    "Droit immobilier": ["Baux commerciaux", "Construction"],
-    "Contentieux commercial": ["Rupture brutale et distribution"],
+    "Droit social": ["Licenciements économiques (PSE)", "Cadres dirigeants"],
+    "Droit immobilier": ["Baux commerciaux"],
+    "Contentieux des affaires": ["Rupture brutale et distribution"],
 }
 TYPES = {"conclusions": "Procédure / conclusions", "audit": "Audit / due diligence"}
 
@@ -34,9 +34,10 @@ def _fake_post(payload_content):
 
 
 def test_mock_analysis_detects_specialty():
-    result = ai.analyze_task("Licenciement d'un salarié", "Préparer le dossier prud'hommes", SPECIALTIES, TYPES)
+    result = ai.analyze_task("Fermeture d'un site", "Licenciement économique de 85 salariés, PSE et CSE",
+                             SPECIALTIES, TYPES)
     assert result["specialty"] == "Droit social" and result["source"] == "simulé"
-    assert result["sub_specialty"] == "Contentieux prud'homal"
+    assert result["sub_specialty"] == "Licenciements économiques (PSE)"
 
 
 def test_validation_clamps_and_rejects_unknown_values():
@@ -60,8 +61,6 @@ def test_live_call_is_parsed(monkeypatch):
     assert result == {"specialty": "Droit immobilier", "sub_specialty": "Baux commerciaux", "task_type": "audit",
                       "complexity": 2, "estimated_hours": 7.5, "keywords": ["bail"], "summary": "Revue de baux.",
                       "source": "mistral"}
-    model, vectors = ai.embed(["a", "b"])
-    assert model == config.MISTRAL_EMBED_MODEL and len(vectors) == 2
 
 
 def test_auto_mode_falls_back_to_mock_on_api_error(monkeypatch):

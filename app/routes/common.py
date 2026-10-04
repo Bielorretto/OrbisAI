@@ -1,14 +1,16 @@
 """Utilitaires partagés par les routes : utilisateur courant, rendu des pages, messages flash."""
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote, unquote
+import hashlib
+import hmac
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import Depends, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
-from app import clock, labels
+from app import clock, config, labels
 from app.db import get_db
 from app.models import CalendarEvent, Role, User
 from app.services import ai, billing
@@ -53,9 +55,43 @@ class Forbidden(Exception):
     pass
 
 
+# --------------------------------------------------------------------------- identité par onglet
+# Chaque onglet garde sa propre identité : un jeton signé (paramètre « as » ou en-tête X-As) transporté par les
+# liens, formulaires et appels de l'onglet (voir static/app.js). On peut ainsi ouvrir associé, collaborateur et
+# stagiaire côte à côte. Le cookie « uid » ne sert que de repli quand aucun jeton n'est présent.
+
+def identity_token(user: User) -> str:
+    signature = hmac.new(config.SECRET_KEY.encode(), str(user.id).encode(), hashlib.sha256).hexdigest()[:16]
+    return f"{user.id}.{signature}"
+
+
+def _user_id_from_token(token: str) -> int | None:
+    uid, _, signature = token.partition(".")
+    if not uid.isdigit():
+        return None
+    expected = hmac.new(config.SECRET_KEY.encode(), uid.encode(), hashlib.sha256).hexdigest()[:16]
+    return int(uid) if hmac.compare_digest(signature, expected) else None
+
+
+def request_token(request: Request) -> str | None:
+    return request.headers.get("x-as") or request.query_params.get("as")
+
+
+def with_params(url: str, **params: str) -> str:
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query))
+    query.update({k: v for k, v in params.items() if v is not None})
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
 def current_user(request: Request, db: Session = Depends(get_db)) -> User:
-    uid = request.cookies.get("uid")
-    user = db.get(User, int(uid)) if uid and uid.isdigit() else None
+    token = request_token(request)
+    if token:
+        uid = _user_id_from_token(token)
+    else:
+        cookie = request.cookies.get("uid")
+        uid = int(cookie) if cookie and cookie.isdigit() else None
+    user = db.get(User, uid) if uid else None
     if user is None:
         raise LoginRequired()
     return user
@@ -67,30 +103,21 @@ def require_role(user: User, *roles: str) -> None:
 
 
 def redirect(url: str, message: str | None = None, error: bool = False) -> RedirectResponse:
-    response = RedirectResponse(url, status_code=303)
+    """Redirection ; le message de confirmation passe par l'adresse (propre à l'onglet, pas de cookie partagé)."""
     if message:
-        response.set_cookie("flash", quote(("!" if error else "") + message), max_age=30)
-    return response
+        url = with_params(url, flash=message, flash_error="1" if error else None)
+    return RedirectResponse(url, status_code=303)
 
 
 def render(request: Request, template: str, db: Session, user: User | None, **context):
-    flash = request.cookies.get("flash")
-    flash_message, flash_error = None, False
-    if flash:
-        flash_message = unquote(flash)
-        if flash_message.startswith("!"):
-            flash_message, flash_error = flash_message[1:], True
     context.update(
         request=request, user=user, now=clock.now(db), ai_status=ai.status(),
-        flash=flash_message, flash_error=flash_error,
+        flash=request.query_params.get("flash"), flash_error=request.query_params.get("flash_error") == "1",
         unread=unread_count(db, user) if user else 0,
         timer=billing.running_timer(db, user) if user else None,
         all_users=db.query(User).order_by(User.role, User.name).all() if user else [],
     )
-    response = templates.TemplateResponse(request, template, context)
-    if flash:
-        response.delete_cookie("flash")
-    return response
+    return templates.TemplateResponse(request, template, context)
 
 
 # --------------------------------------------------------------------------- agenda

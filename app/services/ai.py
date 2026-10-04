@@ -9,10 +9,8 @@ L'IA assiste, elle ne décide pas : les sorties sont validées avant d'être uti
 et la logique critique (cascade, scores, montants) reste du code classique.
 On n'envoie pas les noms des clients à Mistral.
 """
-import hashlib
 import json
 import logging
-import math
 import re
 import time
 import unicodedata
@@ -31,7 +29,6 @@ class AIError(Exception):
 
 
 _state = {"disabled_until": 0.0, "last_error": None, "last_success": None, "calls": 0}
-_explanation_cache: dict[str, dict[int, str]] = {}
 
 
 def status() -> dict:
@@ -53,7 +50,6 @@ def status() -> dict:
 
 def reset_state() -> None:
     _state.update(disabled_until=0.0, last_error=None)
-    _explanation_cache.clear()
 
 
 def _live_available() -> bool:
@@ -188,46 +184,69 @@ def _validate_analysis(raw: dict, specialties: dict[str, list[str]], task_types:
 
 
 _SPECIALTY_KEYWORDS = {
-    "Droit des sociétés": ["societe", "cession", "actions", "statuts", "fusion", "acquisition", "pacte",
-                           "associes", "assemblee", "gouvernance", "due diligence", "capital", "holding"],
-    "Droit social": ["licenciement", "salarie", "prud", "contrat de travail", "cse", "rupture conventionnelle",
-                     "harcelement", "employeur", "convention collective", "plan social"],
-    "Contentieux commercial": ["assignation", "contentieux", "tribunal de commerce", "litige", "creance",
-                               "recouvrement", "refere", "conclusions", "appel", "mise en demeure", "rupture brutale"],
-    "Droit immobilier": ["bail", "baux", "loyer", "immobilier", "construction", "copropriete", "vente immobiliere",
-                         "promoteur", "permis", "locataire", "bailleur"],
-    "Propriété intellectuelle": ["marque", "brevet", "contrefacon", "droit d'auteur", "licence", "logiciel",
-                                 "inpi", "dessin", "propriete intellectuelle", "nom de domaine"],
-    "Droit pénal des affaires": ["penal", "abus de biens sociaux", "corruption", "garde a vue", "plainte",
-                                 "escroquerie", "fraude", "blanchiment", "instruction", "parquet"],
+    "M&A et private equity": ["acquisition", "cession", "spa", "due diligence", "fusion", "fonds", "fpci",
+                              "investisseur", "closing", "private equity", "ief"],
+    "Droit des sociétés": ["statuts", "joint-venture", "ohada", "filiale", "restructuration du groupe",
+                           "implantation", "assemblee", "audit de contrats", "contrats fournisseurs"],
+    "Restructuring et financement": ["redressement", "cessation des paiements", "conciliation", "dette",
+                                     "financement", "suretes", "pool bancaire", "covenants", "procedure collective"],
+    "Pénal des affaires": ["corruption", "penal", "enquete interne", "pnf", "fraude", "abus de biens sociaux"],
+    "Compliance": ["sapin", "rgpd", "ai act", "conformite", "anticorruption", "commission europeenne", "entente",
+                   "concurrence", "clemence"],
+    "Contentieux des affaires": ["litige", "assignation", "contentieux", "recouvrement", "injonction de payer",
+                                 "rupture brutale", "arbitrage", "assurance", "sinistre", "tribunal de commerce"],
+    "Droit social": ["licenciement", "pse", "cse", "salarie", "prud", "directeur general salarie"],
+    "Propriété intellectuelle et numérique": ["brevet", "marque", "contrefacon", "licence", "saas", "logiciel",
+                                              "base de donnees"],
+    "Droit fiscal": ["fiscal", "prix de transfert", "redressement fiscal", "verification de comptabilite"],
+    "Droit public des affaires": ["marche public", "commande publique", "refere precontractuel"],
+    "Droit immobilier": ["bail", "baux", "loyer", "bailleur"],
 }
 _SUB_KEYWORDS = {
-    "Fusions-acquisitions": ["fusion", "acquisition", "cession", "due diligence", "garantie d'actif"],
-    "Secrétariat juridique et gouvernance": ["assemblee", "statuts", "pv", "proces-verbal", "approbation des comptes"],
-    "Pactes d'associés": ["pacte"],
-    "Contentieux prud'homal": ["prud", "conseil de prud'hommes", "faute grave"],
-    "Relations collectives": ["cse", "plan social", "pse", "accord collectif"],
-    "Rupture du contrat de travail": ["rupture conventionnelle", "licenciement", "demission"],
-    "Rupture brutale et distribution": ["rupture brutale", "distribution", "relations commerciales", "fournisseur"],
-    "Recouvrement de créances": ["recouvrement", "creance", "impaye", "injonction de payer"],
-    "Référés et urgence": ["refere", "urgence"],
-    "Baux commerciaux": ["bail", "baux", "loyer", "deplafonnement", "indexation"],
-    "Construction": ["construction", "chantier", "decennale"],
-    "Transactions immobilières": ["vente immobiliere", "acquisition immobiliere", "promesse de vente"],
-    "Marques": ["marque", "inpi", "euipo", "anteriorite"],
-    "Brevets": ["brevet", "invention"],
-    "Contrefaçon et logiciels": ["contrefacon", "logiciel", "licence"],
-    "Abus de biens sociaux et fraude": ["abus de biens sociaux", "fraude", "escroquerie"],
-    "Corruption et compliance": ["corruption", "compliance", "sapin"],
-    "Enquêtes internes": ["enquete interne", "audition", "lanceur d'alerte"],
+    "Acquisitions de sociétés": ["acquisition", "spa", "cession"],
+    "Opérations transfrontalières": ["americain", "etats-unis", "cfius", "transfrontal", "delaware"],
+    "Contrôle des investissements étrangers": ["ief", "investissements etrangers", "direction generale du tresor"],
+    "Fusions": ["fusion", "traite de fusion"],
+    "Fonds d'investissement": ["fonds", "fpci", "societe de gestion"],
+    "Due diligence": ["due diligence", "data room"],
+    "Restructurations de groupe": ["restructuration du groupe", "apport partiel", "reorganisation"],
+    "Joint-ventures et implantation internationale": ["joint-venture", "implantation", "filiale"],
+    "Droit OHADA": ["ohada", "cote d'ivoire", "senegal"],
+    "Audit contractuel": ["audit de", "contrats fournisseurs", "revue des contrats"],
+    "Procédures collectives": ["redressement judiciaire", "cessation des paiements", "liquidation"],
+    "Restructuration de dette": ["dette", "conciliation", "reechelonnement"],
+    "Financement de projets et sûretés": ["financement", "project finance", "suretes", "pool bancaire"],
+    "Réglementation bancaire": ["acpr", "agrement", "dsp2"],
+    "Corruption et enquêtes internes": ["corruption", "enquete interne", "pnf", "afa"],
+    "Fraude et abus de biens sociaux": ["fraude", "abus de biens sociaux", "escroquerie"],
+    "Anticorruption (Sapin II)": ["sapin", "anticorruption", "red flags"],
+    "RGPD et IA": ["rgpd", "ai act", "donnees personnelles", "intelligence artificielle"],
+    "Droit de la concurrence": ["entente", "concurrence", "clemence", "griefs"],
+    "Contentieux contractuel": ["inexecution", "contrat d'approvisionnement", "responsabilite contractuelle"],
+    "Rupture brutale et distribution": ["rupture brutale", "distribution", "preavis"],
+    "Recouvrement": ["recouvrement", "creance", "injonction de payer", "impaye"],
+    "Contentieux international et arbitrage": ["arbitrage", "bruxelles i", "rome i", "international", "exequatur"],
+    "Assurances": ["assurance", "assureur", "sinistre"],
+    "Licenciements économiques (PSE)": ["pse", "licenciement economique", "plan de sauvegarde"],
+    "Cadres dirigeants": ["directeur general", "cadre dirigeant", "mandataire"],
+    "Brevets": ["brevet", "revendications"],
+    "Marques": ["marque", "inpi", "euipo"],
+    "Contrats IT et SaaS": ["saas", "licence logicielle", "sla", "logiciel"],
+    "Bases de données": ["base de donnees", "sui generis"],
+    "Prix de transfert et contrôle fiscal": ["prix de transfert", "controle fiscal", "rectification"],
+    "Commande publique": ["marche public", "refere", "commande publique"],
+    "Baux commerciaux": ["bail", "baux", "loyer"],
 }
 _TYPE_KEYWORDS = {
-    "conclusions": ["conclusions", "assignation", "plaidoirie", "procedure", "refere", "audience"],
-    "acte": ["rediger le contrat", "acte de", "convention", "contrat", "rupture conventionnelle"],
+    "transactionnel": ["acquisition", "negociation", "spa", "fusion", "joint-venture", "financement", "creation"],
+    "contentieux": ["litige", "assignation", "contentieux", "arbitrage", "tribunal", "contestation", "action en"],
+    "conseil": ["audit", "mise en conformite", "enquete", "analyse", "conseil"],
+    "conclusions": ["conclusions", "plaidoirie", "memoire", "requete"],
+    "acte": ["rediger le contrat", "acte de", "convention", "traite", "pacte"],
     "audit": ["audit", "due diligence", "revue de"],
-    "consultation": ["note", "consultation", "analyser", "qualifier"],
+    "consultation": ["note", "consultation", "recherches"],
     "negociation": ["negoci"],
-    "formalites": ["depot", "formalites", "greffe", "proces-verbal", "immatriculation", "statuts"],
+    "formalites": ["depot", "formalites", "greffe", "proces-verbal", "immatriculation", "registre"],
 }
 _COMPLEX_HINTS = ["complexe", "fusion", "acquisition", "cour d'appel", "cassation", "international",
                   "plan social", "instruction", "due diligence", "urgent", "plusieurs"]
@@ -266,99 +285,75 @@ def _mock_analyze(title: str, description: str, specialties: dict[str, list[str]
             "estimated_hours": min(hours, 200.0), "keywords": keywords, "summary": summary + "."}
 
 
-# --------------------------------------------------------------------------- 2. embeddings
+# --------------------------------------------------------------------------- 2. classement des candidats
 
-MOCK_EMBED_MODEL = "mock-hash-256"
+RANKING_SYSTEM = (
+    "Tu es responsable du staffing d'un cabinet d'avocats d'affaires. On te donne un dossier (ou une tâche) à "
+    "pourvoir, la hiérarchie des critères d'attribution du cabinet, et le profil COMPLET de chaque candidat "
+    "éligible (les critères éliminatoires ont déjà été appliqués). Classe TOUS les candidats éligibles, du plus au "
+    "moins susceptible de mener ce travail à bien.\n"
+    "- Raisonne sur l'ensemble des informations : description du travail, domaine et sous-spécialité, dossiers "
+    "similaires, type de dossier, charge et disponibilités, échéances, relation et langue du client, pays, système "
+    "juridique, expérience, ancienneté, préférences.\n"
+    "- Respecte la hiérarchie des critères : les critères principaux priment sur les complémentaires ; dans chaque "
+    "groupe, un critère mieux classé pèse davantage ; une charge plus élevée pénalise fortement.\n"
+    "- score : entier de 0 à 100 (probabilité de réussir ce travail), décroissant dans le classement.\n"
+    "- raison : une phrase de 15 mots maximum, en français, qui donne l'argument décisif, sans inventer de faits.\n"
+    'Réponds uniquement en JSON : {"classement": [{"id": <id>, "score": <0-100>, "raison": "..."}]}'
+)
 
 
-def embed(texts: list[str]) -> tuple[str, list[list[float]]]:
-    """Retourne (nom du modèle, vecteurs). Le nom sert à ne comparer que des vecteurs compatibles."""
-    def live():
-        data = _post("/embeddings", {"model": config.MISTRAL_EMBED_MODEL, "input": texts})
-        vectors = [item["embedding"] for item in sorted(data["data"], key=lambda d: d["index"])]
-        if len(vectors) != len(texts):
-            raise ValueError("Nombre d'embeddings inattendu")
-        return config.MISTRAL_EMBED_MODEL, vectors
+def rank_candidates(context: dict, eligible_ids: list[int]) -> dict | None:
+    """Classement par Mistral. Retourne {"order": [ids], "scores": {id: score}, "reasons": {id: raison}},
+    ou None si Mistral n'est pas disponible (l'appelant utilise alors le calcul local)."""
+    if not _live_available():
+        return None
+    for attempt in range(3):
+        try:
+            raw = _chat_json(config.MISTRAL_MODEL_LARGE, RANKING_SYSTEM, json.dumps(context, ensure_ascii=False))
+            result = _validate_ranking(raw, eligible_ids)
+            _state.update(last_success=time.strftime("%H:%M:%S"), last_error=None)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            if _status_code(exc) == 429 and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            _state["last_error"] = _describe_error(exc)
+            log.warning("Classement Mistral indisponible : %s", _state["last_error"])
+            if config.AI_MODE == "auto":
+                _state["disabled_until"] = time.time() + (20 if _status_code(exc) == 429 else config.AI_RETRY_AFTER_SECONDS)
+            return None
+    return None
 
-    return _run(live, lambda: (MOCK_EMBED_MODEL, [_mock_embed(t) for t in texts]))
 
-
-_STOPWORDS = set("le la les de des du un une et en a au aux pour par sur dans avec l d que qui est ce ces son sa ses"
-                 " il elle nous vous ils leur leurs ou ne pas plus se s y".split())
+def _validate_ranking(raw: dict, eligible_ids: list[int]) -> dict:
+    allowed = set(eligible_ids)
+    order, scores, reasons = [], {}, {}
+    for entry in raw.get("classement", []):
+        try:
+            uid = int(entry["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if uid not in allowed or uid in order:
+            continue
+        order.append(uid)
+        try:
+            scores[str(uid)] = max(0, min(100, round(float(entry.get("score", 0)))))
+        except (TypeError, ValueError):
+            scores[str(uid)] = 0
+        reasons[str(uid)] = str(entry.get("raison", ""))[:200]
+    if not order:
+        raise ValueError("Classement vide ou invalide")
+    # Le score doit suivre le classement : on corrige les incohérences éventuelles
+    previous = 100
+    for uid in order:
+        scores[str(uid)] = previous = min(scores[str(uid)], previous)
+    return {"order": order, "scores": scores, "reasons": reasons}
 
 
 def _normalize(text: str) -> str:
     text = unicodedata.normalize("NFKD", text.lower())
     return "".join(c for c in text if not unicodedata.combining(c))
-
-
-def _mock_embed(text: str, dim: int = 256) -> list[float]:
-    vector = [0.0] * dim
-    for word in re.findall(r"[a-z]{3,}", _normalize(text)):
-        if word in _STOPWORDS:
-            continue
-        stem = word[:6]  # racinisation grossière : « licenciement » ~ « licencier »
-        h = int(hashlib.md5(stem.encode()).hexdigest(), 16)
-        vector[h % dim] += 1.0 if (h >> 8) % 2 else -1.0
-    norm = math.sqrt(sum(v * v for v in vector)) or 1.0
-    return [v / norm for v in vector]
-
-
-def cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    return dot / (na * nb) if na and nb else 0.0
-
-
-# --------------------------------------------------------------------------- 3. explication du classement
-
-def explain_ranking(task_info: dict, candidates: list[dict]) -> dict[int, str]:
-    """candidates : [{id, name, score, facts: [str]}] -> {id: phrase courte}. Résultat mis en cache."""
-    if not candidates:
-        return {}
-    cache_key = hashlib.md5(json.dumps([task_info, candidates], sort_keys=True, default=str).encode()).hexdigest()
-    if cache_key in _explanation_cache:
-        return _explanation_cache[cache_key]
-
-    def live():
-        system = (
-            "Tu aides un associé d'un cabinet d'avocats à choisir à qui confier une tâche. "
-            "Pour chaque candidat, écris UNE phrase très courte (15 mots maximum), factuelle, en français, qui donne "
-            "la raison principale de son classement (point fort ou point faible), "
-            "en t'appuyant uniquement sur les faits fournis. "
-            'Réponds en JSON : {"explanations": [{"id": <id>, "text": "..."}]}'
-        )
-        user = json.dumps({"tache": task_info, "candidats": candidates}, ensure_ascii=False)
-        raw = _chat_json(config.MISTRAL_MODEL_SMALL, system, user, temperature=0.3)
-        result = {}
-        for item in raw.get("explanations", []):
-            try:
-                result[int(item["id"])] = str(item["text"])[:300]
-            except (KeyError, TypeError, ValueError):
-                continue
-        # Candidat oublié par le modèle : on complète avec l'explication simulée
-        mock = _mock_explain(candidates)
-        return {c["id"]: result.get(c["id"]) or mock[c["id"]] for c in candidates}
-
-    result = _run(live, lambda: _mock_explain(candidates))
-    _explanation_cache[cache_key] = result
-    return result
-
-
-def _mock_explain(candidates: list[dict]) -> dict[int, str]:
-    out = {}
-    for c in candidates:
-        facts = c.get("facts", [])
-        positives = [f for f in facts if not f.startswith("⚠")]
-        warnings = [f.removeprefix("⚠ ") for f in facts if f.startswith("⚠")]
-        text = ", ".join(positives[:2]) if positives else "Profil peu adapté"
-        if warnings:
-            text += f" ; attention : {warnings[0].lower()}"
-        out[c["id"]] = text[:1].upper() + text[1:] + "."
-    return out
 
 
 # --------------------------------------------------------------------------- 4. libellés de facturation
@@ -421,6 +416,19 @@ def chat(system: str, messages: list[dict], fallback: Callable[[], str]) -> tupl
             log.warning("Chat Mistral en échec : %s", _state["last_error"])
             raise AIError(_state["last_error"]) from exc
     raise AIError("Mistral n'a pas répondu")
+
+
+def _mock_explain(candidates: list[dict]) -> dict[int, str]:
+    out = {}
+    for c in candidates:
+        facts = c.get("facts", [])
+        positives = [f for f in facts if not f.startswith("⚠")]
+        warnings = [f.removeprefix("⚠ ") for f in facts if f.startswith("⚠")]
+        text = ", ".join(positives[:2]) if positives else "Profil peu adapté"
+        if warnings:
+            text += f" ; attention : {warnings[0][:1].lower()}{warnings[0][1:]}"
+        out[c["id"]] = text[:1].upper() + text[1:] + "."
+    return out
 
 
 def explain_locally(candidates: list[dict]) -> dict[int, str]:

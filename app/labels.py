@@ -1,8 +1,8 @@
 """Libellés d'interface (français) pour les valeurs stockées en base."""
 from app.models import DelegationStatus, MatterStatus, ProposalStatus, Role, TaskStatus, TimeEntryStatus
 
-ROLE = {Role.FOUNDING_PARTNER: "Partner", Role.PARTNER: "Associé", Role.ASSOCIATE: "Collaborateur",
-        Role.INTERN: "Stagiaire"}
+ROLE = {Role.PARTNER: "Associé", Role.SENIOR: "Collab. senior",
+        Role.ASSOCIATE: "Collaborateur", Role.JUNIOR: "Junior", Role.INTERN: "Stagiaire"}
 
 MATTER_STATUS = {
     MatterStatus.TO_ASSIGN: "À attribuer",
@@ -67,6 +67,11 @@ def refusal(code: str | None) -> str:
 
 # Types de dossier : libellé, activités associées (préférences personnelles), nature
 TASK_TYPES = {
+    # Types de dossier (tableau des dossiers du cabinet)
+    "transactionnel": ("Transactionnel", {"négociation", "rédaction"}, "transactionnel"),
+    "contentieux": ("Contentieux", {"contentieux", "rédaction"}, "contentieux"),
+    "conseil": ("Conseil", {"recherche", "rédaction"}, None),
+    # Types de travail (tâches)
     "conclusions": ("Procédure / conclusions", {"contentieux", "rédaction"}, "contentieux"),
     "acte": ("Rédaction d'actes / contrats", {"rédaction"}, "transactionnel"),
     "audit": ("Audit / due diligence", {"recherche"}, "transactionnel"),

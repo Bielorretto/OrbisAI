@@ -8,14 +8,23 @@ from app.db import Base
 
 
 class Role:
-    """Hiérarchie du cabinet : partner (fondateur) > associé > collaborateur > stagiaire."""
-    FOUNDING_PARTNER = "partner"
+    """Hiérarchie du cabinet : associé > collaborateur (senior, collaborateur, junior) > stagiaire."""
     PARTNER = "associe"
+    SENIOR = "collab_senior"
     ASSOCIATE = "collaborateur"
+    JUNIOR = "junior"
     INTERN = "stagiaire"
 
-    ASSIGNERS = (FOUNDING_PARTNER, PARTNER)  # ceux qui attribuent les tâches (responsables du CA)
-    LEVEL = {INTERN: 1, ASSOCIATE: 2, PARTNER: 3, FOUNDING_PARTNER: 4}
+    ASSIGNERS = (PARTNER,)                        # responsables des dossiers (et du chiffre d'affaires)
+    LAWYERS = (SENIOR, ASSOCIATE, JUNIOR)          # collaborateurs : staffés sur les dossiers, créent les tâches
+    LEVEL = {INTERN: 1, JUNIOR: 2, ASSOCIATE: 3, SENIOR: 4, PARTNER: 5}
+
+
+class TeamRole:
+    """Place d'une personne dans l'équipe d'un dossier."""
+    PARTNER = "associe"
+    LAWYER = "collaborateur"
+    INTERN = "stagiaire"
 
 
 class MatterStatus:
@@ -104,6 +113,10 @@ class User(Base):
         return self.role in Role.ASSIGNERS
 
     @property
+    def is_lawyer(self) -> bool:
+        return self.role in Role.LAWYERS
+
+    @property
     def level(self) -> int:
         return Role.LEVEL.get(self.role, 0)
 
@@ -178,7 +191,7 @@ class Matter(Base):
     specialty_id: Mapped[int | None] = mapped_column(ForeignKey("specialties.id"))
     sub_specialty_id: Mapped[int | None] = mapped_column(ForeignKey("sub_specialties.id"))
     task_type: Mapped[str | None] = mapped_column(String(40))         # type de dossier, voir labels.TASK_TYPES
-    min_level: Mapped[str] = mapped_column(String(20), default=Role.ASSOCIATE)
+    min_level: Mapped[str] = mapped_column(String(20), default=Role.JUNIOR)
     required_language: Mapped[str | None] = mapped_column(String(60))
     required_jurisdiction: Mapped[str | None] = mapped_column(String(120))
     country: Mapped[str | None] = mapped_column(String(80))
@@ -187,10 +200,10 @@ class Matter(Base):
     estimated_hours: Mapped[float] = mapped_column(Float, default=10)  # charge estimée du dossier
     deadline: Mapped[datetime] = mapped_column(DateTime, index=True)   # prochaine échéance du dossier
     notify_days_before: Mapped[int] = mapped_column(Integer, default=7)
+    priority: Mapped[int | None] = mapped_column(Integer)                 # rang de priorité (1 = le plus prioritaire)
     # Attribution
-    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))    # associé responsable
+    created_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))    # associé qui a ouvert le dossier
     status: Mapped[str] = mapped_column(String(30), default=MatterStatus.TO_ASSIGN, index=True)
-    assignee_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))  # collaborateur responsable
     created_at: Mapped[datetime] = mapped_column(DateTime)
     notified_at: Mapped[datetime | None] = mapped_column(DateTime)       # notification J-x envoyée
     reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -203,7 +216,8 @@ class Matter(Base):
     specialty: Mapped["Specialty | None"] = relationship()
     sub_specialty: Mapped["SubSpecialty | None"] = relationship()
     created_by: Mapped["User"] = relationship(foreign_keys=[created_by_id])
-    assignee: Mapped["User | None"] = relationship(foreign_keys=[assignee_id])
+    members: Mapped[list["MatterMember"]] = relationship(back_populates="matter", order_by="MatterMember.id",
+                                                         cascade="all, delete-orphan")
     proposals: Mapped[list["Proposal"]] = relationship(
         back_populates="matter", order_by="(Proposal.round, Proposal.rank)", cascade="all, delete-orphan")
     tasks: Mapped[list["Task"]] = relationship(back_populates="matter", order_by="Task.deadline")
@@ -212,6 +226,39 @@ class Matter(Base):
     @property
     def title(self) -> str:
         return f"{self.reference} · {self.name}"
+
+    def team(self, team_role: str) -> list["User"]:
+        return [m.user for m in self.members if m.team_role == team_role]
+
+    @property
+    def partners(self) -> list["User"]:
+        return self.team(TeamRole.PARTNER)
+
+    @property
+    def lawyers(self) -> list["User"]:
+        return self.team(TeamRole.LAWYER)
+
+    @property
+    def interns(self) -> list["User"]:
+        return self.team(TeamRole.INTERN)
+
+    def has_member(self, user: "User", team_role: str | None = None) -> bool:
+        return any(m.user_id == user.id and (team_role is None or m.team_role == team_role) for m in self.members)
+
+
+class MatterMember(Base):
+    """Équipe d'un dossier : plusieurs associés, collaborateurs et stagiaires peuvent y travailler."""
+    __tablename__ = "matter_members"
+    __table_args__ = (UniqueConstraint("matter_id", "user_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    matter_id: Mapped[int] = mapped_column(ForeignKey("matters.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    team_role: Mapped[str] = mapped_column(String(20))
+    joined_at: Mapped[datetime] = mapped_column(DateTime)
+
+    matter: Mapped[Matter] = relationship(back_populates="members")
+    user: Mapped["User"] = relationship()
 
 
 class Conflict(Base):
@@ -448,3 +495,14 @@ class Setting(Base):
 
     key: Mapped[str] = mapped_column(String(60), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
+
+
+class RankingCache(Base):
+    """Classement établi par Mistral, mémorisé : le classement par l'IA n'est pas déterministe, on le garde stable
+    tant que les informations utilisées (dossier, candidats, charges) n'ont pas changé."""
+    __tablename__ = "ranking_cache"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)   # ex. matter:12:collaborateur
+    fingerprint: Mapped[str] = mapped_column(String(64))              # empreinte des informations utilisées
+    payload: Mapped[str] = mapped_column(Text)                        # JSON {order, scores, reasons, source}
+    created_at: Mapped[datetime] = mapped_column(DateTime)

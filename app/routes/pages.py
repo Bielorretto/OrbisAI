@@ -10,10 +10,11 @@ from sqlalchemy.orm import Session
 
 from app import clock
 from app.db import get_db
+from app.demo_data import EXAMPLE_ALIASES
 from app.labels import ROLE
-from app.models import (Conflict, Delegation, DelegationStatus, EmailOutbox, Matter, MatterStatus, Notification,
-                        Proposal, ProposalStatus, Role, Task, TaskStatus, User)
-from app.routes.common import Forbidden, agenda_days, current_user, redirect, render
+from app.models import (Conflict, Delegation, DelegationStatus, EmailOutbox, Matter, MatterMember, MatterStatus,
+                        Notification, Proposal, ProposalStatus, Role, Task, TaskStatus, TeamRole, User)
+from app.routes.common import Forbidden, agenda_days, current_user, identity_token, redirect, render, with_params
 from app.services import scheduler
 from app.services.scoring import logged_hours, workload
 from app.services.workflow import current_proposal
@@ -22,7 +23,7 @@ router = APIRouter()
 
 
 # Trois entrées à la connexion ; les partners passent par « Associé »
-LOGIN_ROLES = {Role.PARTNER: Role.ASSIGNERS, Role.ASSOCIATE: (Role.ASSOCIATE,), Role.INTERN: (Role.INTERN,)}
+LOGIN_ROLES = {Role.PARTNER: Role.ASSIGNERS, Role.ASSOCIATE: Role.LAWYERS, Role.INTERN: (Role.INTERN,)}
 
 
 def _normalize(text: str) -> str:
@@ -35,6 +36,8 @@ def find_user_by_name(db: Session, role: str, name: str) -> User | None:
     wanted = _normalize(name)
     if not wanted:
         return None
+    if wanted == "exemple" and role in EXAMPLE_ALIASES:  # raccourci de démo vers un vrai profil
+        wanted = _normalize(EXAMPLE_ALIASES[role])
     users = db.scalars(select(User).where(User.role.in_(LOGIN_ROLES.get(role, ())))).all()
     exact = [u for u in users if _normalize(u.name) == wanted]
     if exact:
@@ -60,7 +63,9 @@ def login(user_id: int | None = Form(None), role: str = Form(""), name: str = Fo
         return redirect(f"/login?role={role}&next={quote(next)}",
                         f"Aucun {ROLE.get(role, 'utilisateur').lower()} trouvé pour « {name} ».",
                         error=True)
-    response = redirect(next if next.startswith("/") else "/", f"Connecté en tant que {user.name}")
+    # L'onglet reçoit son jeton d'identité dans l'adresse ; le cookie sert de repli
+    target = with_params(next if next.startswith("/") else "/", **{"as": identity_token(user)})
+    response = redirect(target, f"Connecté en tant que {user.name}")
     response.set_cookie("uid", str(user.id), httponly=True, samesite="lax")
     return response
 
@@ -78,9 +83,16 @@ def logout():
 def dashboard(request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
     now = clock.now(db)
     if user.is_assigner:
-        matters = db.scalars(select(Matter).where(Matter.created_by_id == user.id).order_by(Matter.deadline)).all()
+        matters = _my_matters(db, user, TeamRole.PARTNER)
         to_assign = [m for m in matters if m.status in (MatterStatus.TO_ASSIGN, MatterStatus.CASCADE_FAILED)]
-        proposing = [(m, current_proposal(m)) for m in matters if m.status == MatterStatus.PROPOSING]
+        # Dossiers dont une proposition attend une réponse (premier collaborateur ou renfort d'une équipe),
+        # avec les réponses déjà reçues dans la cascade en cours (refus, absence de réponse)
+        proposing = []
+        for m in matters:
+            pending = current_proposal(m)
+            if pending:
+                earlier = [p for p in m.proposals if p.round == pending.round and p.rank < pending.rank]
+                proposing.append((m, pending, earlier))
         active = [(m, _matter_progress(db, m)) for m in matters if m.status == MatterStatus.ACTIVE]
         closed = sorted([m for m in matters if m.status == MatterStatus.CLOSED],
                         key=lambda m: m.closed_at or m.deadline, reverse=True)[:6]
@@ -88,11 +100,10 @@ def dashboard(request: Request, db: Session = Depends(get_db), user: User = Depe
         return render(request, "dashboard_partner.html", db, user, to_assign=to_assign, proposing=proposing,
                       active=active, closed=closed, late=late)
 
-    if user.role == Role.ASSOCIATE:
+    if user.is_lawyer:
         proposals = db.scalars(select(Proposal).where(Proposal.user_id == user.id,
                                                       Proposal.status == ProposalStatus.PENDING)).all()
-        matters = db.scalars(select(Matter).where(Matter.assignee_id == user.id, Matter.status == MatterStatus.ACTIVE)
-                             .order_by(Matter.deadline)).all()
+        matters = [m for m in _my_matters(db, user, TeamRole.LAWYER) if m.status == MatterStatus.ACTIVE]
         mine = db.scalars(select(Task).where(Task.assignee_id == user.id, Task.status.in_(TaskStatus.OPEN))
                           .order_by(Task.deadline)).all()
         # Une seule liste, les tâches qui demandent une action d'abord
@@ -108,6 +119,12 @@ def dashboard(request: Request, db: Session = Depends(get_db), user: User = Depe
     return render(request, "dashboard_intern.html", db, user, delegations=delegations,
                   working=[t for t in mine if t.status in (TaskStatus.IN_PROGRESS, TaskStatus.IN_REVIEW)],
                   done=[t for t in mine if t.status == TaskStatus.DONE])
+
+
+def _my_matters(db: Session, user: User, team_role: str) -> list[Matter]:
+    """Dossiers dont la personne fait partie de l'équipe (plusieurs associés peuvent partager un dossier)."""
+    return list(db.scalars(select(Matter).join(MatterMember).where(
+        MatterMember.user_id == user.id, MatterMember.team_role == team_role).order_by(Matter.deadline)))
 
 
 def _matter_progress(db: Session, matter: Matter) -> dict:

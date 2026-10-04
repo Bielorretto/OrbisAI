@@ -7,6 +7,10 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
+# --- Sécurité ---
+# Signe les jetons d'identité des onglets. À changer (variable d'environnement) en dehors de la démo.
+SECRET_KEY = os.getenv("SECRET_KEY", "loickaton-demo-secret")
+
 # --- Base de données ---
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'data' / 'loickaton.db'}")
 if DATABASE_URL.startswith("sqlite:///") and not DATABASE_URL.startswith("sqlite:////"):
@@ -46,6 +50,9 @@ LUNCH_END_HOUR = 14
 MAIN_CRITERIA_SHARE = 0.8
 # Disponibilité minimale (éliminatoire) : heures libres avant la deadline >= effort estimé x ce ratio
 MIN_AVAILABILITY_RATIO = 1.0
+# Pour rejoindre l'équipe d'un dossier : heures libres minimum avant la prochaine échéance
+# (25 % de la charge estimée du dossier, plafonné à cette valeur)
+MATTER_MIN_FREE_HOURS = 10
 
 # --- Planificateur ---
 SCHEDULER_INTERVAL_SECONDS = int(os.getenv("SCHEDULER_INTERVAL_SECONDS", "60"))

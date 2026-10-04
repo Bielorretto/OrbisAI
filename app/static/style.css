@@ -315,3 +315,4 @@ details.excluded summary { cursor: pointer; font-size: .9rem; }
 .facts-line strong { color: var(--text); font-weight: 600; }
 .form-simple { max-width: 760px; }
 .suggestion { padding: .5rem 0; border-bottom: 1px solid var(--border); }
+.ranking-source { margin: 0 0 .75rem; }

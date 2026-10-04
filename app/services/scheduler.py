@@ -32,18 +32,19 @@ def tick(db: Session) -> dict:
         if matter.deadline - timedelta(days=matter.notify_days_before) <= now:
             matter.notified_at = now
             days = max(0, (matter.deadline - now).days)
-            notify(db, matter.created_by, "to_assign",
-                   f"Le dossier « {matter.name} » est à J-{days} : choisissez à qui le confier.",
-                   matter, link=f"/matters/{matter.id}/assign")
-            log_event(db, matter, "partner_notified", f"Associé notifié (J-{days})")
-            by_partner[matter.created_by_id].append(matter)
+            for partner in matter.partners or [matter.created_by]:
+                notify(db, partner, "to_assign",
+                       f"Le dossier « {matter.name} » est à J-{days} : choisissez à qui le confier.",
+                       matter, link=f"/matters/{matter.id}/assign")
+                by_partner[partner.id].append(matter)
+            log_event(db, matter, "partner_notified", f"Associés notifiés (J-{days})")
     for partner_id, matters in by_partner.items():
         partner = db.get(User, partner_id)
         lines = "\n".join(f"- {m.name} (échéance {m.deadline:%d/%m}) : {config.APP_BASE_URL}/matters/{m.id}/assign"
                           for m in matters)
         send_email(db, partner.email, f"{len(matters)} dossier(s) à attribuer",
                    f"Bonjour {partner.name},\n\nCes dossiers approchent de leur échéance :\n{lines}\n")
-        summary["to_assign"] += len(matters)
+    summary["to_assign"] = len({m.id for ms in by_partner.values() for m in ms})
 
     # 2. Propositions expirées -> collaborateur suivant
     summary["expired"] = expire_proposals(db, now)
@@ -53,9 +54,10 @@ def tick(db: Session) -> dict:
     for matter in db.scalars(select(Matter).where(Matter.status == MatterStatus.ACTIVE,
                                                   Matter.reminder_sent_at.is_(None), Matter.deadline <= reminder_limit)):
         matter.reminder_sent_at = now
-        notify(db, matter.assignee, "deadline_reminder",
-               f"Rappel : échéance du dossier « {matter.name} » le {matter.deadline:%d/%m à %Hh%M}.", matter,
-               email_subject=f"Échéance proche : {matter.name}")
+        for lawyer in matter.lawyers:
+            notify(db, lawyer, "deadline_reminder",
+                   f"Rappel : échéance du dossier « {matter.name} » le {matter.deadline:%d/%m à %Hh%M}.", matter,
+                   email_subject=f"Échéance proche : {matter.name}")
         summary["reminders"] += 1
     for task in db.scalars(select(Task).where(Task.status.in_(TaskStatus.ACTIVE_WORK),
                                               Task.reminder_sent_at.is_(None), Task.deadline <= reminder_limit)):

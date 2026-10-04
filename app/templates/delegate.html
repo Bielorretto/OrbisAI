@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import criteria_table, assistant %}
+{% from "macros.html" import criteria_table, assistant, ranking_source %}
 {% block title %}Déléguer · {{ task.title }}{% endblock %}
 {% block content %}
 {% set eligible = candidates|rejectattr('eliminated')|list %}
@@ -12,6 +12,7 @@
   <form method="post" action="/tasks/{{ task.id }}/work-myself"><button class="btn">Je la fais moi-même</button></form>
 </div>
 
+{{ ranking_source(source, "/tasks/" ~ task.id ~ "/delegate") }}
 {% for c in eligible %}
   <article class="candidate">
     <div class="rank">{{ loop.index }}</div>

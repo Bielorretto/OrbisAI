@@ -93,3 +93,11 @@
     </form>
   </section>
 {%- endmacro %}
+
+{% macro ranking_source(source, url) -%}
+  <p class="small muted ranking-source">
+    {% if source == 'mistral' %}Classement établi par Mistral à partir des profils complets et des critères du cabinet.
+    {% else %}Mistral indisponible : classement calculé localement à partir des critères.{% endif %}
+    <a href="{{ url }}?refresh=1">Recalculer</a>
+  </p>
+{%- endmacro %}

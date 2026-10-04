@@ -12,10 +12,10 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app import clock
-from app.labels import COMPLEMENTARY_CRITERIA, ELIMINATORY, MAIN_CRITERIA, ROLE, TASK_TYPES
-from app.models import Matter, Role, Task, User
+from app.labels import COMPLEMENTARY_CRITERIA, ELIMINATORY, MAIN_CRITERIA, ROLE
+from app.models import Matter, Role, Task, TeamRole, User
 from app.services import ai
-from app.services.scoring import Candidate, compare, rank_candidates
+from app.services.scoring import Candidate, compare, item_info, profile_info, rank_candidates
 
 MAX_HISTORY = 8
 MAX_MESSAGE_LENGTH = 1000
@@ -26,10 +26,12 @@ class AssistantError(Exception):
 
 
 def pool_for(user: User, item: Matter | Task) -> str | None:
-    """Associé/partner sur un dossier -> collaborateurs ; collaborateur responsable d'une tâche -> stagiaires."""
+    """Associés sur un dossier -> collaborateurs ; collaborateurs de l'équipe sur une tâche -> stagiaires."""
     if isinstance(item, Matter):
         return Role.ASSOCIATE if user.is_assigner else None
-    return Role.INTERN if user.id == item.assignee_id else None
+    if user.id == item.assignee_id or item.matter.has_member(user, TeamRole.LAWYER):
+        return Role.INTERN
+    return None
 
 
 def suggestions(candidates: list[Candidate], pool: str) -> list[str]:
@@ -54,11 +56,11 @@ def answer(db: Session, user: User, task: Matter | Task, question: str, history:
     if not question:
         raise AssistantError("Posez une question.")
     now = clock.now(db)
-    candidates = rank_candidates(db, task, pool, now, explain=False)
+    candidates = rank_candidates(db, task, now)  # même classement (Mistral, mémorisé) que celui affiché
     messages = [{"role": m["role"], "content": str(m["content"])[:MAX_MESSAGE_LENGTH]}
                 for m in history[-MAX_HISTORY:] if m.get("role") in ("user", "assistant") and m.get("content")]
     messages.append({"role": "user", "content": question})
-    system = _system_prompt(task, candidates, pool, user, now)
+    system = _system_prompt(db, task, candidates, pool, user, now)
     fallback = lambda: local_answer(question, task, candidates, pool)  # noqa: E731
     text, source = ai.chat(system, messages, fallback)
     errors = factual_errors(text, candidates)
@@ -101,34 +103,20 @@ def factual_errors(text: str, candidates: list[Candidate]) -> list[str]:
 
 # --------------------------------------------------------------------------- contexte pour Mistral
 
-def _system_prompt(task: Matter | Task, candidates: list[Candidate], pool: str, user: User, now: datetime) -> str:
+def _system_prompt(db: Session, task: Matter | Task, candidates: list[Candidate], pool: str, user: User,
+                   now: datetime) -> str:
     noun = "collaborateurs" if pool == Role.ASSOCIATE else "stagiaires"
     is_matter = isinstance(task, Matter)
     item = "le dossier" if is_matter else "la tâche"
-    client = task.client
     homonym = any(c.user.name == user.name and c.user.id != user.id for c in candidates)
     who = f"l'{ROLE[user.role].lower()} responsable du dossier" if is_matter else \
         f"le {ROLE[user.role].lower()} responsable de la tâche"
     speaker = who if homonym else f"{user.name} ({who})"
     data = {
-        "nature": "dossier" if is_matter else "tâche",
-        "element": {
-            "titre": task.title,
-            "dossier": None if is_matter else task.matter.title,
-            "domaine": task.specialty.name if task.specialty else None,
-            "sous_specialite": task.sub_specialty.name if task.sub_specialty else None,
-            "type_de_dossier": TASK_TYPES[task.task_type][0] if task.task_type else None,
-            "effort_estime_heures": task.estimated_hours,
-            "echeance": task.deadline.strftime("%d/%m/%Y %Hh%M"),
-            "niveau_minimum": ROLE.get(task.min_level),
-            "langue_obligatoire": task.required_language,
-            "juridiction_obligatoire": task.required_jurisdiction,
-            # Le nom du client n'est pas transmis (pseudonymisation)
-            "client": {"secteur": client.sector, "langue": client.language, "pays": client.country},
-        },
+        "element": item_info(task, now),
         "eligibles_par_ordre": [_display_name(c, user) for c in candidates if not c.eliminated],
         "exclus": {_display_name(c, user): c.eliminated for c in candidates if c.eliminated},
-        "classement": [_candidate_data(i, c, user) for i, c in enumerate(candidates, 1)],
+        "classement": [_candidate_data(db, i, c, user, task, now) for i, c in enumerate(candidates, 1)],
     }
     hierarchy = {
         "1_eliminatoires_dans_l_ordre": list(ELIMINATORY.values()),
@@ -180,7 +168,8 @@ def _display_name(c: Candidate, user: User) -> str:
     return f"{c.user.name} ({ROLE[c.user.role].lower()})" if c.user.name == user.name else c.user.name
 
 
-def _candidate_data(position: int, c: Candidate, user: User) -> dict:
+def _candidate_data(db: Session, position: int, c: Candidate, user: User, item: Matter | Task,
+                    now: datetime) -> dict:
     if c.eliminations:
         return {"nom": _display_name(c, user), "statut": "exclu",
                 "motifs_d_exclusion": [m for _, m in c.eliminations]}
@@ -189,11 +178,11 @@ def _candidate_data(position: int, c: Candidate, user: User) -> dict:
         "nom": _display_name(c, user),
         "statut": "éligible (n'est PAS exclu)",
         "score": c.score,
-        "cout_estime_euros_ht": c.estimated_cost,
-        "fin_estimee": c.estimated_finish.strftime("%d/%m %Hh%M") if c.estimated_finish else None,
+        "raison_du_classement": c.explanation,
         "criteres": [{"critere": cr.label, "groupe": "principal" if cr.tier == "main" else "complémentaire",
                       "rang": cr.rank, "evaluation": _grade(cr.value), "detail": cr.detail}
                      for cr in c.criteria if cr.value is not None],
+        "profil_complet": profile_info(db, c, item, now),
     }
 
 

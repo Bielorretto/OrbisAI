@@ -3,19 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Loickaton{% endblock %} · Loickaton</title>
+  <title>{% block title %}Orbis AI{% endblock %} · Orbis AI</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 {% if user %}
 <header class="topbar">
-  <a class="brand" href="/">Loick<span>aton</span></a>
+  <a class="brand" href="/">Orbis<span>AI</span></a>
   <nav class="nav">
     {% if user.is_assigner %}
       <a href="/">Mes dossiers</a>
       <a href="/matters/new">Nouveau dossier</a>
       <a href="/billing">Facturation</a>
-    {% elif user.role == Role.ASSOCIATE %}
+    {% elif user.is_lawyer %}
       <a href="/">Mes dossiers</a>
       <a href="/timesheet">Mes temps</a>
     {% else %}

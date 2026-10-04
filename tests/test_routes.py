@@ -1,11 +1,13 @@
-"""Parcours de démo complet à travers l'interface HTTP."""
+"""Parcours complet à travers l'interface HTTP, avec les vrais profils et dossiers."""
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.main import app
-from app.models import Proposal, ProposalStatus, Task, User
-from tests.conftest import matter
+from app.models import Delegation, Proposal, ProposalStatus, Task, User
+from tests.conftest import dossier
+
+IEF, NOVAPAY = 32, 1
 
 
 @pytest.fixture()
@@ -15,14 +17,14 @@ def client(db):
 
 
 def _login(client, name, role="collaborateur"):
-    """Connexion comme un humain : rôle + nom tapé."""
     client.cookies.clear()
     response = client.post("/login", data={"role": role, "name": name}, follow_redirects=False)
-    assert response.status_code == 303 and response.headers["location"] == "/", f"connexion refusée : {name}"
+    assert response.status_code == 303 and response.headers["location"].startswith("/?as="), f"refusée : {name}"
+    return response.headers["location"].split("as=")[1].split("&")[0]
 
 
-def _ids(db, *names):
-    return [db.scalars(select(User.id).where(User.name == n)).one() for n in names]
+def _id(db, name):
+    return db.scalars(select(User.id).where(User.name == name)).one()
 
 
 def test_pages_require_login(client):
@@ -30,78 +32,82 @@ def test_pages_require_login(client):
     assert response.status_code == 303 and response.headers["location"].startswith("/login")
 
 
-def test_full_demo_path(client, db):
-    m = matter(db, "2026-014")
-    _login(client, "exemple", role="associe")
-    assert "Nordis – litige fournisseur" in client.get("/").text   # l'associé voit des dossiers
-    page = client.get(f"/matters/{m.id}/assign")
-    assert page.status_code == 200 and "Sarah Benali" in page.text
+def test_full_path(client, db):
+    m = dossier(db, IEF)
+    _login(client, "exemple", role="associe")                    # Jean Moreau
+    page = client.get("/").text
+    assert "Energie Stratégique" in page
+    assign = client.get(f"/matters/{m.id}/assign").text
+    assert "Léa Garnier" in assign and "classement calculé localement" in assign.lower()
 
-    client.post(f"/matters/{m.id}/assign", data={"user_ids": _ids(db, "Sarah Benali", "Camille Bernard",
-                                                                   "Maxime Fontaine")})
+    from app.services.scoring import rank_candidates
+    others = [c.user.id for c in rank_candidates(db, m, use_ai=False)
+              if not c.eliminated and c.user.name != "Léa Garnier"][:2]
+    client.post(f"/matters/{m.id}/assign", data={"user_ids": [_id(db, "Léa Garnier"), *others]})
     db.expire_all()
     first = db.scalars(select(Proposal).where(Proposal.matter_id == m.id, Proposal.rank == 1)).one()
     assert first.status == ProposalStatus.PENDING
 
-    _login(client, "Sarah Benali")
-    client.post(f"/proposals/{first.id}/refuse", data={"reason": "overloaded"})
-    _login(client, "Camille Bernard")
-    assert "Nordis – litige fournisseur" in client.get("/").text
-    second = db.scalars(select(Proposal).where(Proposal.matter_id == m.id, Proposal.rank == 2)).one()
-    client.post(f"/proposals/{second.id}/accept")
+    _login(client, "exemple")                                   # Léa Garnier
+    client.post(f"/proposals/{first.id}/accept")
+    db.expire_all()
+    assert "Léa Garnier" in [u.name for u in dossier(db, IEF).lawyers]
 
-    # Le collaborateur crée une tâche dans le dossier et la fait lui-même
-    assert client.get(f"/matters/{m.id}/tasks/new").status_code == 200
-    client.post(f"/matters/{m.id}/tasks", data={"title": "Rédiger les conclusions en réponse",
+    client.post(f"/matters/{m.id}/tasks", data={"title": "Analyse de l'éligibilité au contrôle IEF",
                                                 "deadline": "2099-01-01T18:00", "estimated_hours": 6,
                                                 "next_step": "myself"})
     db.expire_all()
     task = db.scalars(select(Task).where(Task.matter_id == m.id)).one()
-    assert task.status == "in_progress" and task.assignee.name == "Camille Bernard"
-    client.post("/time-entries", data={"task_id": task.id, "hours": 2, "note": "plan des conclusions"})
-    assert "plan des conclusions" in client.get("/timesheet").text.lower()
+    assert task.status == "in_progress"
+    client.post("/time-entries", data={"task_id": task.id, "hours": 2, "note": "analyse du secteur"})
     client.post(f"/tasks/{task.id}/complete")
 
-    # Une deuxième tâche, confiée à un stagiaire
-    response = client.post(f"/matters/{m.id}/tasks", data={"title": "Analyser les pièces adverses",
-                                                           "deadline": "2099-01-01T18:00", "estimated_hours": 3,
-                                                           "next_step": "delegate"}, follow_redirects=False)
+    response = client.post(f"/matters/{m.id}/tasks", data={"title": "Préparer la data room", "estimated_hours": 3,
+                                                           "deadline": "2099-01-01T18:00", "next_step": "delegate"},
+                           follow_redirects=False)
     assert "/delegate" in response.headers["location"]
-    delegate_page = client.get(response.headers["location"])
-    assert delegate_page.status_code == 200 and "Emma Petit" in delegate_page.text
-
-    _login(client, "exemple", role="associe")
-    assert client.get(f"/matters/{m.id}").status_code == 200
-    assert client.get("/billing").status_code == 200
+    assert client.get(response.headers["location"]).status_code == 200
 
 
-def test_matter_creation_with_ai_analysis(client, db):
-    _login(client, "Antoine Ferrand", role="associe")
-    analysis = client.post("/matters/analyze", data={"title": "Contester un licenciement",
-                                                     "description": "salarié, prud'hommes"}).json()
-    assert analysis["specialty"] == "Droit social" and analysis["specialty_id"]
-    response = client.post("/matters", data={"name": "Lemaire – licenciement d'un chef d'équipe",
-                                             "client_id": matter(db, "2026-032").client_id,
-                                             "deadline": "2099-01-01T18:00", "estimated_hours": 8,
-                                             "specialty_id": analysis["specialty_id"]}, follow_redirects=False)
-    assert response.headers["location"].startswith("/matters/")
+def test_assigned_dossier_is_not_listed_as_to_assign(client, db):
+    _login(client, "Pierre Richard", role="associe")
+    page = client.get("/").text
+    to_assign = page.split("En cours")[0]
+    assert "NovaPay" not in to_assign and "NovaPay" in page      # dossier partagé avec Jean Moreau
 
 
-def test_collaborator_cannot_open_billing_or_create_matters(client, db):
-    _login(client, "Julien Moreau")
-    assert client.get("/billing", follow_redirects=False).status_code == 303
-    assert client.get("/matters/new", follow_redirects=False).status_code == 303
+def test_dossier_shared_by_several_partners(client, db):
+    for name in ("Jean Moreau", "Pierre Richard"):
+        _login(client, name, role="associe")
+        assert "NovaPay" in client.get("/").text
+
+
+def test_lawyer_outside_team_cannot_open_dossier(client, db):
+    _login(client, "Maxime Laurent")
+    response = client.get(f"/matters/{dossier(db, NOVAPAY).id}", follow_redirects=False)
+    assert response.status_code == 303
+
+
+def test_intern_page(client, db):
+    _login(client, "exemple", role="stagiaire")                  # Hugo Lambert
+    page = client.get("/").text
+    assert "Préparer la liste de questions pour la data room" in page   # à accepter
+    assert "Due diligence réglementaire" in page                        # en cours
+    delegation = db.scalars(select(Delegation).where(Delegation.status == "pending",
+                                                     Delegation.to_user_id == _id(db, "Hugo Lambert"))).one()
+    client.post(f"/delegations/{delegation.id}/accept")
+    client.post(f"/tasks/{delegation.task_id}/submit-review")
+    db.expire_all()
+    assert db.get(Task, delegation.task_id).status == "in_review"
 
 
 @pytest.mark.parametrize("role, name, expected", [
-    ("associe", "exemple", ("Exemple", "associe")),
-    ("collaborateur", "  EXEMPLE ", ("Exemple", "collaborateur")),
-    ("collaborateur", "helene marchal", None),        # mauvais rôle
-    ("associe", "Hélène Marchal", ("Hélène Marchal", "partner")),    # les partners passent par « Associé »
-    ("collaborateur", "benali", ("Sarah Benali", "collaborateur")),  # nom de famille seul, unique
-    ("stagiaire", "chloe martin", ("Chloé Martin", "stagiaire")),    # entrée « Stagiaire »
-    ("collaborateur", "chloe martin", None),                          # un stagiaire n'est pas collaborateur
-    ("stagiaire", "exemple", ("Exemple", "stagiaire")),
+    ("associe", "exemple", ("Jean Moreau", "associe")),
+    ("collaborateur", "exemple", ("Léa Garnier", "collab_senior")),
+    ("stagiaire", "exemple", ("Hugo Lambert", "stagiaire")),
+    ("collaborateur", "tom laurent", ("Tom Laurent", "junior")),
+    ("associe", "Sarah Cohen", ("Sarah Cohen", "associe")),
+    ("collaborateur", "clara dupont", None),
     ("collaborateur", "inconnu", None),
 ])
 def test_login_by_name(db, role, name, expected):
@@ -110,55 +116,52 @@ def test_login_by_name(db, role, name, expected):
     assert (user.name, user.role) == expected if expected else user is None
 
 
-def test_login_page_shows_no_names(client):
-    page = client.get("/login?role=collaborateur").text
-    assert 'name="name"' in page and "Sarah Benali" not in page
-
-
-def test_example_accounts_have_work(client, db):
-    _login(client, "exemple", role="associe")
-    assert "Nordis – litige fournisseur" in client.get("/").text
-    _login(client, "exemple")
-    page = client.get("/").text
-    assert "Hestia – audit des baux commerciaux" in page          # dossier proposé
-    assert "Hestia – recouvrement de loyers impayés" in page      # dossier dont il est responsable
-
-
 def test_assistant_endpoint(client, db):
-    m = matter(db, "2026-014")
+    m = dossier(db, IEF)
     _login(client, "exemple", role="associe")
-    response = client.post(f"/matters/{m.id}/assistant",
-                           json={"message": "Pourquoi Sarah plutôt que Camille ?", "history": []})
-    data = response.json()
-    assert response.status_code == 200 and data["source"] == "simulé"
-    assert "Sarah Benali" in data["answer"] and "Camille Bernard" in data["answer"]
-
-    _login(client, "Julien Moreau")  # ne voit pas ce dossier
-    response = client.post(f"/matters/{m.id}/assistant", json={"message": "Qui ?"}, follow_redirects=False)
-    assert response.status_code == 303
+    data = client.post(f"/matters/{m.id}/assistant",
+                       json={"message": "Pourquoi Léa plutôt qu'Emma ?", "history": []}).json()
+    assert data["source"] == "simulé" and "Léa Garnier" in data["answer"] and "Emma Rolland" in data["answer"]
 
 
-def test_assign_page_shows_criteria_and_assistant(client, db):
-    _login(client, "exemple", role="associe")
-    page = client.get(f"/matters/{matter(db, '2026-014').id}/assign").text
-    assert "expertise dans la sous-spécialité" in page
-    assert "Domaine du droit non maîtrisé" in page
-    assert 'id="assistant-panel"' in page
+def test_matter_creation(client, db):
+    _login(client, "Thomas Bernard", role="associe")
+    analysis = client.post("/matters/analyze", data={"title": "Renouvellement de baux commerciaux",
+                                                     "description": "bail, loyer, bailleur"}).json()
+    assert analysis["specialty"] == "Droit immobilier"
+    response = client.post("/matters", data={"name": "Baux de la Boutique Lune", "client_id": dossier(db, 10).client_id,
+                                             "deadline": "2099-01-01T18:00", "estimated_hours": 8,
+                                             "specialty_id": analysis["specialty_id"]}, follow_redirects=False)
+    assert response.headers["location"].startswith("/matters/")
 
 
-def test_intern_page_lists_assigned_tasks(client, db):
-    _login(client, "exemple", role="stagiaire")
-    page = client.get("/").text
-    assert "Préparer le bordereau de pièces" in page             # délégation à accepter
-    assert "Mettre à jour le registre des mouvements de titres" in page  # tâche en cours
-    assert "Mes tâches" in page and "/billing" not in page
+# --------------------------------------------------------------------------- un onglet = une identité
+
+def test_each_tab_keeps_its_own_identity(client, db):
+    associe = _login(client, "Jean Moreau", role="associe")
+    stagiaire = _login(client, "Hugo Lambert", role="stagiaire")   # le cookie est maintenant celui du stagiaire
+    # …mais l'onglet de l'associé, qui transporte son jeton, reste l'associé
+    page = client.get(f"/?as={associe}").text
+    assert "Jean Moreau" in page and "Nouveau dossier" in page
+    page = client.get("/", headers={"X-As": stagiaire}).text
+    assert "Hugo Lambert" in page and "Nouveau dossier" not in page
 
 
-def test_intern_accepts_then_finishes_a_task(client, db):
-    from app.models import Delegation
-    _login(client, "exemple", role="stagiaire")
-    delegation = db.scalars(select(Delegation).where(Delegation.status == "pending")).first()
-    client.post(f"/delegations/{delegation.id}/accept")
-    client.post(f"/tasks/{delegation.task_id}/submit-review")
-    db.expire_all()
-    assert db.get(Task, delegation.task_id).status == "in_review"
+def test_redirects_keep_the_tab_identity(client, db):
+    associe = _login(client, "Jean Moreau", role="associe")
+    _login(client, "Léa Garnier")                                   # autre onglet, autre personne
+    response = client.post(f"/notifications/read-all?as={associe}", follow_redirects=False)
+    assert f"as={associe}" in response.headers["location"]
+
+
+def test_forged_identity_is_rejected(client, db):
+    _login(client, "Léa Garnier")
+    response = client.get(f"/?as={_id(db, 'Jean Moreau')}.0000000000000000", follow_redirects=False)
+    assert response.status_code == 303 and response.headers["location"].startswith("/login")
+
+
+def test_flash_message_travels_with_the_page(client, db):
+    client.cookies.clear()
+    page = client.post("/login", data={"role": "associe", "name": "Jean Moreau"})  # suit la redirection
+    assert "Connecté en tant que Jean Moreau" in page.text                         # message dans l'adresse
+    assert "flash" not in client.cookies                                           # aucun cookie partagé

@@ -1,33 +1,41 @@
-"""Matching : classe les collaborateurs pour un DOSSIER (choix de l'associé) ou les stagiaires pour une TÂCHE
-(choix du collaborateur responsable), selon le document « Critères d'attribution » et dans son ordre hiérarchique.
-Dossiers et tâches ont les mêmes caractéristiques (domaine, sous-spécialité, type, échéance, effort, exigences) :
-on parle ci-dessous d'« élément » (item) pour l'un ou l'autre.
+"""Classement des personnes pour un DOSSIER (collaborateurs, choix de l'associé) ou une TÂCHE (stagiaires, choix du
+collaborateur), selon le document « Critères d'attribution ».
 
-1. Critères éliminatoires, dans l'ordre : conflit d'intérêts, domaine du droit non maîtrisé, sous-spécialité
-   non maîtrisée, niveau hiérarchique insuffisant, disponibilité minimale, puis langue et juridiction
-   obligatoires (tableau d'exclusion automatique). Un seul critère suffit à écarter la personne.
-2. Critères principaux (11) puis complémentaires (7) : chacun donne une valeur entre 0 et 1, pondérée selon
-   son rang (le 1er critère d'un groupe pèse le plus). Un critère sans objet pour la tâche est ignoré.
-3. En plus du score : coût estimé (effort x taux) et date de fin estimée d'après l'agenda.
-4. Mistral rédige une phrase d'explication ; l'assistant (services/assistant.py) répond aux questions.
+Deux étapes :
+1. Critères ÉLIMINATOIRES (règles fixes, vérifiées par le code, dans l'ordre du document) : conflit d'intérêts,
+   domaine du droit non maîtrisé, sous-spécialité non maîtrisée, niveau hiérarchique insuffisant, disponibilité
+   minimale, puis langue et juridiction obligatoires.
+2. CLASSEMENT des personnes éligibles par Mistral : savoir qui est le plus susceptible de mener le travail à bien
+   n'est pas une question déterministe. Mistral reçoit TOUTES les informations (profil complet, dossiers en cours et
+   passés, disponibilités, relation client…) ainsi que la hiérarchie des critères, et rend un classement motivé.
+   Ce classement est mémorisé (RankingCache) pour rester stable tant que les informations ne changent pas.
+   Sans Mistral, un calcul local pondéré par le rang des critères prend le relais.
 """
+import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app import config
+from app import clock, config
 from app.labels import COMPLEMENTARY_CRITERIA, ELIMINATORY, MAIN_CRITERIA, ROLE, SPECIALTY_LEVEL, TASK_TYPES
-from app.models import (CalendarEvent, Client, Conflict, Matter, MatterStatus, Role, Task, TaskStatus, TimeEntry,
-                        User)
-
-Item = Matter | Task
+from app.models import (CalendarEvent, Client, Conflict, Matter, MatterMember, MatterStatus, RankingCache, Role, Task,
+                        TaskStatus, TeamRole, TimeEntry, User)
 from app.services import ai
 
-MAX_EXPLAINED = 10  # on ne demande une explication à Mistral que pour les premiers du classement
+Item = Matter | Task
 DEFAULT_LEGAL_SYSTEM = "Droit français"
+CACHE_HOURS = 24
+CEFR = {"A1": 1, "A2": 2, "B1": 3, "B2": 4, "C1": 5, "C2": 6}
+MASTERED = CEFR["C1"]   # niveau à partir duquel une langue obligatoire est considérée comme maîtrisée
+
+
+class Ranking(list):
+    """Liste de candidats (éligibles d'abord, dans l'ordre du classement) + origine du classement."""
+    source: str = "local"   # "mistral" ou "local"
 
 
 @dataclass
@@ -36,7 +44,7 @@ class Criterion:
     label: str
     tier: str            # "main" | "complementary"
     rank: int            # position dans la hiérarchie du groupe (1 = le plus important)
-    value: float | None  # 0..1, None = sans objet pour cette tâche
+    value: float | None  # 0..1, None = sans objet
     detail: str
 
 
@@ -46,7 +54,6 @@ class Candidate:
     score: float = 0.0
     eliminations: list[tuple[str, str]] = field(default_factory=list)  # [(clé, motif)] dans l'ordre hiérarchique
     criteria: list[Criterion] = field(default_factory=list)
-    badges: list[str] = field(default_factory=list)
     free_hours: float = 0.0
     active_tasks: int = 0
     estimated_cost: float = 0.0
@@ -55,12 +62,10 @@ class Candidate:
 
     @property
     def eliminated(self) -> str | None:
-        """Premier motif d'élimination (le plus haut dans la hiérarchie)."""
         return self.eliminations[0][1] if self.eliminations else None
 
     @property
     def facts(self) -> list[str]:
-        """Faits lisibles, dans l'ordre hiérarchique ; « ⚠ » marque un point faible."""
         return [("⚠ " if c.value is not None and c.value < 0.34 else "") + c.detail
                 for c in self.criteria if c.value is not None]
 
@@ -78,10 +83,28 @@ def _in(value: str | None, text: str | None) -> bool:
     return bool(value) and ai.normalize(value).strip() in split_list(text)
 
 
+def language_levels(user: User) -> dict[str, int]:
+    """« Français C2, Anglais B2 » -> {"francais": 6, "anglais": 4}. Sans niveau indiqué : C2."""
+    out = {}
+    for part in (user.languages or "").split(","):
+        match = re.match(r"\s*(.+?)\s*\b([ABC][12])?\s*$", part.strip())
+        if match and match.group(1):
+            out[ai.normalize(match.group(1))] = CEFR.get(match.group(2) or "C2", 6)
+    return out
+
+
+def language_level(user: User, language: str) -> int:
+    return language_levels(user).get(ai.normalize(language), 0)
+
+
+def pool_for(item: Item) -> tuple[str, ...]:
+    """Dossier -> collaborateurs (senior, collaborateur, junior) ; tâche -> stagiaires."""
+    return Role.LAWYERS if isinstance(item, Matter) else (Role.INTERN,)
+
+
 # --------------------------------------------------------------------------- disponibilités
 
 def _work_intervals(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
-    """Plages de travail (jours ouvrés, hors pause déjeuner) entre start et end."""
     intervals = []
     day = start.replace(hour=0, minute=0, second=0, microsecond=0)
     while day < end:
@@ -95,8 +118,8 @@ def _work_intervals(start: datetime, end: datetime) -> list[tuple[datetime, date
     return intervals
 
 
-def _merge(intervals: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
-    merged: list[tuple[datetime, datetime]] = []
+def _merge(intervals):
+    merged = []
     for a, b in sorted(intervals):
         if merged and a <= merged[-1][1]:
             merged[-1] = (merged[-1][0], max(merged[-1][1], b))
@@ -105,7 +128,7 @@ def _merge(intervals: list[tuple[datetime, datetime]]) -> list[tuple[datetime, d
     return merged
 
 
-def _overlap_hours(work: list[tuple[datetime, datetime]], busy: list[tuple[datetime, datetime]]) -> float:
+def _overlap_hours(work, busy) -> float:
     total = 0.0
     for a, b in work:
         for c, d in busy:
@@ -116,7 +139,6 @@ def _overlap_hours(work: list[tuple[datetime, datetime]], busy: list[tuple[datet
 
 
 def _free_intervals(work, busy):
-    """Plages de travail moins les créneaux occupés."""
     for a, b in work:
         cursor = a
         for c, d in busy:
@@ -142,20 +164,23 @@ def remaining_hours(db: Session, item: Item) -> float:
     return max(0.0, item.estimated_hours - logged_hours(db, item))
 
 
-def workload(db: Session, user: User, exclude: Item | None = None) -> list[Item]:
-    """Ce qui occupe la personne : ses dossiers en cours (collaborateur) ou ses tâches déléguées (stagiaire).
-    La charge estimée d'un dossier couvre les tâches que le collaborateur y réalise lui-même."""
+def workload(db: Session, user: User, exclude: Item | None = None) -> list[tuple[Item, float]]:
+    """Charge en cours : [(élément, heures restantes pour cette personne)].
+    Collaborateur : sa part du reste à faire de chaque dossier en cours de son équipe.
+    Stagiaire : le reste à faire des tâches qui lui sont déléguées."""
     if user.role == Role.INTERN:
-        items = db.scalars(select(Task).where(Task.status.in_(TaskStatus.ACTIVE_WORK), Task.delegate_id == user.id))
-    else:
-        items = db.scalars(select(Matter).where(Matter.status == MatterStatus.ACTIVE, Matter.assignee_id == user.id))
-    return [i for i in items if i is not exclude]
+        tasks = db.scalars(select(Task).where(Task.status.in_(TaskStatus.ACTIVE_WORK), Task.delegate_id == user.id))
+        return [(t, remaining_hours(db, t)) for t in tasks if t is not exclude]
+    matters = db.scalars(select(Matter).join(MatterMember).where(
+        Matter.status == MatterStatus.ACTIVE, MatterMember.user_id == user.id,
+        MatterMember.team_role == TeamRole.LAWYER))
+    return [(m, remaining_hours(db, m) / max(1, len(m.lawyers))) for m in matters if m is not exclude]
 
 
-def _busy(db: Session, user: User, start: datetime, end: datetime, load: list[Item]):
+def _busy(db: Session, user: User, start: datetime, end: datetime, load):
     # Les blocs « travail » liés à une tâche déjà comptée dans la charge ne sont pas comptés deux fois
-    counted = {t.id for t in load if isinstance(t, Task)} | {
-        t.id for m in load if isinstance(m, Matter) for t in m.tasks}
+    counted = {i.id for i, _ in load if isinstance(i, Task)} | {
+        t.id for m, _ in load if isinstance(m, Matter) for t in m.tasks}
     events = db.scalars(select(CalendarEvent).where(
         CalendarEvent.user_id == user.id, CalendarEvent.end > start, CalendarEvent.start < end))
     return _merge([(e.start, e.end) for e in events if e.task_id not in counted])
@@ -169,26 +194,22 @@ def free_hours(db: Session, user: User, start: datetime, end: datetime, exclude:
     capacity = sum((b - a).total_seconds() / 3600 for a, b in work)
     load = workload(db, user, exclude)
     available = capacity - _overlap_hours(work, _busy(db, user, start, end, load))
-
     window = (end - start).total_seconds()
-    for item in load:
-        remaining = remaining_hours(db, item)
+    for item, hours in load:
         if item.deadline <= end:
-            available -= remaining
-        else:  # l'élément se termine après : on n'en compte qu'une part proportionnelle
-            span = max((item.deadline - start).total_seconds(), 1)
-            available -= remaining * min(1.0, window / span)
+            available -= hours
+        else:  # se termine après : on n'en compte qu'une part proportionnelle
+            available -= hours * min(1.0, window / max((item.deadline - start).total_seconds(), 1))
     return round(max(0.0, available), 1)
 
 
-def estimated_finish(db: Session, user: User, item: Item, start: datetime, horizon_days: int = 45) -> datetime | None:
-    """Date de fin estimée : on remplit les créneaux libres de l'agenda, après le reste à faire de la charge
-    en cours dont l'échéance est antérieure. Sert de « délai de traitement proposé »."""
+def estimated_finish(db: Session, user: User, item: Item, start: datetime, horizon_days: int = 60) -> datetime | None:
+    """Date de fin estimée (délai de traitement proposé) : créneaux libres de l'agenda, après le reste à faire
+    de la charge dont l'échéance est antérieure."""
     load = workload(db, user, item)
-    needed = item.estimated_hours + sum(remaining_hours(db, x) for x in load if x.deadline <= item.deadline)
+    needed = item.estimated_hours + sum(h for x, h in load if x.deadline <= item.deadline)
     end = start + timedelta(days=horizon_days)
-    work = _work_intervals(start, end)
-    for a, b in _free_intervals(work, _busy(db, user, start, end, load)):
+    for a, b in _free_intervals(_work_intervals(start, end), _busy(db, user, start, end, load)):
         hours = (b - a).total_seconds() / 3600
         if hours >= needed:
             return a + timedelta(hours=needed)
@@ -196,82 +217,14 @@ def estimated_finish(db: Session, user: User, item: Item, start: datetime, horiz
     return None
 
 
-# --------------------------------------------------------------------------- embeddings (Mistral)
+# --------------------------------------------------------------------------- historique
 
-def _profile_text(db: Session, user: User) -> str:
-    specialties = ", ".join(us.specialty.name for us in user.specialties)
-    subs = ", ".join(us.sub_specialty.name for us in user.sub_specialties)
-    past = [i.title for i in _history(db, user, None)][:20]
-    return f"{user.bio}\nSpécialités : {specialties}\nSous-spécialités : {subs}\nDossiers traités : {'; '.join(past)}"
-
-
-def _task_text(task: Item) -> str:
-    parts = [task.title, task.description, task.specialty.name if task.specialty else "",
-             task.sub_specialty.name if task.sub_specialty else ""]
-    return "\n".join(p for p in parts if p)
-
-
-def _load(raw: str | None) -> tuple[str | None, list[float]]:
-    if not raw:
-        return None, []
-    data = json.loads(raw)
-    return data.get("model"), data.get("v", [])
-
-
-def ensure_embeddings(db: Session, task: Item, users: list[User]) -> None:
-    """Calcule (et stocke) les embeddings manquants ou issus d'un autre modèle que celui de la tâche."""
-    task_model, _ = _load(task.embedding)
-    if task_model is None:
-        task_model, (vector,) = ai.embed([_task_text(task)])
-        task.embedding = json.dumps({"model": task_model, "v": vector})
-    stale = [u for u in users if _load(u.profile_embedding)[0] != task_model]
-    if stale:
-        model, vectors = ai.embed([_profile_text(db, u) for u in stale])
-        if model != task_model:  # l'API a changé d'état entre-temps : on réaligne la tâche
-            task_model, (vector,) = ai.embed([_task_text(task)])
-            task.embedding = json.dumps({"model": task_model, "v": vector})
-            model, vectors = ai.embed([_profile_text(db, u) for u in users])
-            stale = users
-        for u, v in zip(stale, vectors):
-            u.profile_embedding = json.dumps({"model": model, "v": v})
-    db.flush()
-
-
-def invalidate_task_embedding(task: Item) -> None:
-    task.embedding = None
-
-
-# --------------------------------------------------------------------------- critères
-
-def _eliminations(db: Session, user: User, task: Item, client: Client, conflicts: dict[int, str],
-                  free: float) -> list[tuple[str, str]]:
-    """Critères éliminatoires, dans l'ordre hiérarchique du document."""
-    out = []
-    if user.id in conflicts:
-        out.append(("conflict", ELIMINATORY["conflict"] + (f" : {conflicts[user.id]}" if conflicts[user.id] else "")))
-    if task.specialty_id and not any(us.specialty_id == task.specialty_id for us in user.specialties):
-        out.append(("domain", f"{ELIMINATORY['domain']} ({task.specialty.name})"))
-    if task.sub_specialty_id and not any(us.sub_specialty_id == task.sub_specialty_id for us in user.sub_specialties):
-        out.append(("sub_specialty", f"{ELIMINATORY['sub_specialty']} ({task.sub_specialty.name})"))
-    if user.level < Role.LEVEL.get(task.min_level, 1):
-        out.append(("hierarchy", f"{ELIMINATORY['hierarchy']} (minimum : {ROLE[task.min_level].lower()})"))
-    needed = task.estimated_hours * config.MIN_AVAILABILITY_RATIO
-    if free < needed:
-        out.append(("availability", f"{ELIMINATORY['availability']} ({free:g} h libres pour {needed:g} h nécessaires)"))
-    if task.required_language and not _in(task.required_language, user.languages):
-        out.append(("language", f"{ELIMINATORY['language']} ({task.required_language})"))
-    if task.required_jurisdiction and not _in(task.required_jurisdiction, user.jurisdictions):
-        out.append(("jurisdiction", f"{ELIMINATORY['jurisdiction']} ({task.required_jurisdiction})"))
-    return out
-
-
-def _history(db: Session, user: User, exclude: Item | None) -> list[Item]:
-    """Expérience passée et en cours : dossiers dont la personne a été responsable (collaborateur) ou tâches
-    qu'on lui a déléguées (stagiaire)."""
+def history(db: Session, user: User, exclude: Item | None = None) -> list[Item]:
+    """Dossiers de ses équipes (collaborateurs, associés) ou tâches déléguées (stagiaires)."""
     if user.role == Role.INTERN:
         items = db.scalars(select(Task).where(Task.delegate_id == user.id))
     else:
-        items = db.scalars(select(Matter).where(Matter.assignee_id == user.id))
+        items = db.scalars(select(Matter).join(MatterMember).where(MatterMember.user_id == user.id))
     return [i for i in items if i is not exclude]
 
 
@@ -281,104 +234,114 @@ def _client_hours(db: Session, user: User, client_id: int) -> float:
     return (minutes or 0) / 60
 
 
-def _main_criteria(db: Session, c: Candidate, task: Item, client: Client, now: datetime, sim: float,
+# --------------------------------------------------------------------------- 1. critères éliminatoires
+
+def _eliminations(user: User, item: Item, conflicts: dict[int, str], free: float) -> list[tuple[str, str]]:
+    out = []
+    if user.id in conflicts:
+        out.append(("conflict", ELIMINATORY["conflict"] + (f" : {conflicts[user.id]}" if conflicts[user.id] else "")))
+    if item.specialty_id and not any(us.specialty_id == item.specialty_id for us in user.specialties):
+        out.append(("domain", f"{ELIMINATORY['domain']} ({item.specialty.name})"))
+    if item.sub_specialty_id and not any(us.sub_specialty_id == item.sub_specialty_id for us in user.sub_specialties):
+        out.append(("sub_specialty", f"{ELIMINATORY['sub_specialty']} ({item.sub_specialty.name})"))
+    if user.level < Role.LEVEL.get(item.min_level, 1):
+        out.append(("hierarchy", f"{ELIMINATORY['hierarchy']} (minimum : {ROLE[item.min_level].lower()})"))
+    needed = item.estimated_hours * config.MIN_AVAILABILITY_RATIO
+    if isinstance(item, Matter):  # rejoindre une équipe : pouvoir avancer avant la prochaine échéance
+        needed = min(needed, 0.25 * item.estimated_hours, config.MATTER_MIN_FREE_HOURS)
+    if free < needed:
+        out.append(("availability", f"{ELIMINATORY['availability']} ({free:g} h libres pour {needed:g} h nécessaires)"))
+    if item.required_language and language_level(user, item.required_language) < MASTERED:
+        out.append(("language", f"{ELIMINATORY['language']} ({item.required_language}, niveau C1 minimum)"))
+    if item.required_jurisdiction and not _in(item.required_jurisdiction, user.jurisdictions):
+        out.append(("jurisdiction", f"{ELIMINATORY['jurisdiction']} ({item.required_jurisdiction})"))
+    return out
+
+
+# --------------------------------------------------------------------------- 2. critères (informations pour le classement)
+
+def _main_criteria(db: Session, c: Candidate, item: Item, client: Client, now: datetime,
                    max_free: float) -> list[Criterion]:
-    user, history = c.user, _history(db, c.user, task)
+    user, past = c.user, history(db, c.user, item)
     values: dict[str, tuple[float | None, str]] = {}
 
-    # 1. Niveau d'expertise dans le domaine
-    if task.specialty_id:
-        us = next((s for s in user.specialties if s.specialty_id == task.specialty_id), None)
+    if item.specialty_id:
+        us = next((s for s in user.specialties if s.specialty_id == item.specialty_id), None)
         level = us.level if us else 0
-        values["domain_level"] = (level / 3, f"{SPECIALTY_LEVEL.get(level, 'Aucun niveau')} en "
-                                             f"{task.specialty.name.lower()}")
+        values["domain_level"] = (level / 3, f"{SPECIALTY_LEVEL.get(level, 'Aucun niveau')} en {item.specialty.name}")
     else:
         values["domain_level"] = (None, "Pas de domaine imposé")
 
-    # 2. Niveau d'expertise dans la sous-spécialité
-    if task.sub_specialty_id:
-        uss = next((s for s in user.sub_specialties if s.sub_specialty_id == task.sub_specialty_id), None)
+    if item.sub_specialty_id:
+        uss = next((s for s in user.sub_specialties if s.sub_specialty_id == item.sub_specialty_id), None)
         level = uss.level if uss else 0
-        values["sub_level"] = (level / 3, f"{SPECIALTY_LEVEL.get(level, 'Aucun niveau')} en "
-                                          f"{task.sub_specialty.name.lower()}")
+        values["sub_level"] = (level / 3, f"{SPECIALTY_LEVEL.get(level, 'Aucun niveau')} en {item.sub_specialty.name}")
     else:
         values["sub_level"] = (None, "Pas de sous-spécialité imposée")
 
-    # 3. Nombre de dossiers similaires traités (historique déclaré + tâches de l'app + proximité Mistral)
-    if task.sub_specialty_id:
-        declared = next((s.cases_count for s in user.sub_specialties if s.sub_specialty_id == task.sub_specialty_id), 0)
-        in_app = sum(1 for t in history if t.sub_specialty_id == task.sub_specialty_id)
-    elif task.specialty_id:
-        declared = next((s.cases_count for s in user.specialties if s.specialty_id == task.specialty_id), 0)
-        in_app = sum(1 for t in history if t.specialty_id == task.specialty_id)
+    if item.sub_specialty_id:
+        declared = next((s.cases_count for s in user.sub_specialties if s.sub_specialty_id == item.sub_specialty_id), 0)
+        in_app = sum(1 for t in past if t.sub_specialty_id == item.sub_specialty_id)
+    elif item.specialty_id:
+        declared = next((s.cases_count for s in user.specialties if s.specialty_id == item.specialty_id), 0)
+        in_app = sum(1 for t in past if t.specialty_id == item.specialty_id)
     else:
         declared, in_app = 0, 0
     count = declared + in_app
-    values["similar_cases"] = (0.75 * min(1.0, count / 15) + 0.25 * sim,
-                               f"{count} dossier{'s' if count > 1 else ''} similaire{'s' if count > 1 else ''} traité"
-                               f"{'s' if count > 1 else ''}" + (" (profil très proche selon l'IA)" if sim >= 0.8 else ""))
+    values["similar_cases"] = (min(1.0, count / 15), f"{count} dossier{'s' if count > 1 else ''} similaire"
+                                                     f"{'s' if count > 1 else ''} traité{'s' if count > 1 else ''}")
 
-    # 4. Expérience du type de dossier
-    if task.task_type:
+    if item.task_type:
         counts = json.loads(user.task_type_counts or "{}")
-        n = counts.get(task.task_type, 0) + sum(1 for t in history if t.task_type == task.task_type)
-        values["task_type"] = (min(1.0, n / 8), f"{n} dossier{'s' if n > 1 else ''} de type « "
-                                                f"{TASK_TYPES[task.task_type][0].lower()} »")
+        n = counts.get(item.task_type, 0) + sum(1 for t in past if t.task_type == item.task_type)
+        values["task_type"] = (min(1.0, n / 8), f"{n} dossier{'s' if n > 1 else ''} de type "
+                                                f"« {TASK_TYPES[item.task_type][0].lower()} »")
     else:
-        values["task_type"] = (None, "Type de dossier non précisé")
+        values["task_type"] = (None, "Type non précisé")
 
-    # 5. Charge de travail actuelle (comparée aux autres candidats : pénalisation forte)
     values["workload"] = (c.free_hours / max_free if max_free else 0.0,
-                          f"{c.free_hours:g} h libres avant la deadline (besoin estimé : {task.estimated_hours:g} h)")
-
-    # 6. Nombre de dossiers en cours
+                          f"{c.free_hours:g} h libres avant l'échéance (charge estimée : {item.estimated_hours:g} h)")
     values["open_files"] = (max(0.0, 1 - c.active_tasks / 5),
-                            f"{c.active_tasks} dossier{'s' if c.active_tasks > 1 else ''} en cours")
+                            f"{c.active_tasks} {'dossier' if user.role != Role.INTERN else 'tâche'}"
+                            f"{'s' if c.active_tasks > 1 else ''} en cours")
 
-    # 7. Nombre et criticité des échéances à venir (14 jours)
-    upcoming = [t for t in workload(db, user, task) if t.deadline <= now + timedelta(days=14)]
-    critical = sum(1 for t in upcoming if t.deadline <= now + timedelta(days=2))
-    weight = sum(3 if t.deadline <= now + timedelta(days=2) else 2 if t.deadline <= now + timedelta(days=7) else 1
-                 for t in upcoming)
+    upcoming = [x for x, _ in workload(db, user, item) if x.deadline <= now + timedelta(days=14)]
+    critical = sum(1 for x in upcoming if x.deadline <= now + timedelta(days=2))
+    weight = sum(3 if x.deadline <= now + timedelta(days=2) else 2 if x.deadline <= now + timedelta(days=7) else 1
+                 for x in upcoming)
     values["deadlines"] = (max(0.0, 1 - weight / 8),
                            f"{len(upcoming)} échéance{'s' if len(upcoming) > 1 else ''} dans les 14 jours"
                            + (f", dont {critical} sous 48 h" if critical else ""))
 
-    # 8. Secteur d'activité du client
     if client.sector:
         ok = _in(client.sector, user.sectors)
-        values["sector"] = (1.0 if ok else 0.0,
-                            f"{'Maîtrise' if ok else 'Ne connaît pas'} le secteur « {client.sector.lower()} »")
+        values["sector"] = (1.0 if ok else 0.0, f"{'Maîtrise' if ok else 'Ne connaît pas'} le secteur « {client.sector} »")
     else:
-        values["sector"] = (None, "Secteur du client non renseigné")
+        values["sector"] = (None, "Secteur non renseigné")
 
-    # 9. Connaissance préalable du client
-    client_tasks = [t for t in history if t.client.id == client.id]
-    values["client_knowledge"] = (min(1.0, len(client_tasks) / 2),
-                                  f"A déjà travaillé {len(client_tasks)} fois pour ce client" if client_tasks
+    client_items = [t for t in past if t.client.id == client.id]
+    values["client_knowledge"] = (min(1.0, len(client_items) / 2),
+                                  f"A déjà travaillé {len(client_items)} fois pour ce client" if client_items
                                   else "N'a jamais travaillé pour ce client")
-
-    # 10. Historique de relation avec le client
     hours = _client_hours(db, user, client.id)
     values["client_history"] = (min(1.0, hours / 20), f"{hours:g} h passées sur les dossiers de ce client")
 
-    # 11. Langue maternelle du client
     if client.language:
-        ok = _in(client.language, user.languages)
-        values["client_language"] = (1.0 if ok else 0.0,
-                                     f"{'Parle' if ok else 'Ne parle pas'} {client.language.lower()}, "
-                                     "la langue du client")
+        level = language_level(user, client.language)
+        inv = {v: k for k, v in CEFR.items()}
+        values["client_language"] = (1.0 if level >= CEFR["B2"] else 0.5 if level >= CEFR["B1"] else 0.0,
+                                     f"{client.language} : {inv.get(level, 'non parlé')}")
     else:
-        values["client_language"] = (None, "Langue du client non renseignée")
+        values["client_language"] = (None, "Langue non renseignée")
 
     return [Criterion(k, label, "main", i, *values[k]) for i, (k, label) in enumerate(MAIN_CRITERIA.items(), 1)]
 
 
-def _complementary_criteria(c: Candidate, task: Item, client: Client, now: datetime) -> list[Criterion]:
+def _complementary_criteria(c: Candidate, item: Item, client: Client, now: datetime) -> list[Criterion]:
     user = c.user
-    country = task.country or client.country
-    legal_system = task.legal_system or DEFAULT_LEGAL_SYSTEM
-    task_type = TASK_TYPES.get(task.task_type or "")
+    country = item.country or client.country
+    legal_system = item.legal_system or DEFAULT_LEGAL_SYSTEM
+    task_type = TASK_TYPES.get(item.task_type or "")
     nature = task_type[2] if task_type else None
     years = user.years_at_firm(now.date())
     prefs = split_list(user.preferences)
@@ -397,14 +360,13 @@ def _complementary_criteria(c: Candidate, task: Item, client: Client, now: datet
                           + (" (dossier transactionnel)" if nature == "transactionnel" else "")),
         "firm_seniority": (min(1.0, years / 10), f"{years} an{'s' if years > 1 else ''} au cabinet"),
         "preferences": ((1.0 if matching else 0.0) if task_type else None,
-                        f"Aime : {', '.join(matching)}" if matching else "Préférences non alignées avec ce dossier"),
+                        f"Aime : {', '.join(matching)}" if matching else "Préférences non alignées"),
     }
     return [Criterion(k, label, "complementary", i, *values[k])
             for i, (k, label) in enumerate(COMPLEMENTARY_CRITERIA.items(), 1)]
 
 
 def _tier_score(criteria: list[Criterion], tier: str) -> float | None:
-    """Moyenne pondérée par le rang : dans un groupe de n critères, le 1er pèse n, le dernier 1."""
     group = [c for c in criteria if c.tier == tier]
     n = len(group)
     applicable = [(n + 1 - c.rank, c.value) for c in group if c.value is not None]
@@ -412,7 +374,8 @@ def _tier_score(criteria: list[Criterion], tier: str) -> float | None:
     return sum(w * v for w, v in applicable) / total if total else None
 
 
-def _final_score(criteria: list[Criterion]) -> float:
+def local_score(criteria: list[Criterion]) -> float:
+    """Calcul de repli (sans Mistral) : critères pondérés selon leur rang dans la hiérarchie."""
     main, comp = _tier_score(criteria, "main"), _tier_score(criteria, "complementary")
     share = config.MAIN_CRITERIA_SHARE
     if main is None or comp is None:
@@ -420,76 +383,185 @@ def _final_score(criteria: list[Criterion]) -> float:
     return round(100 * (share * main + (1 - share) * comp), 1)
 
 
-def _sort_key(c: Candidate):
-    """Score, puis départage par les critères dans l'ordre hiérarchique."""
-    return (-c.score, *[-(cr.value or 0) for cr in c.criteria])
+# --------------------------------------------------------------------------- informations transmises à Mistral
+
+def item_info(item: Item, now: datetime) -> dict:
+    client = item.client
+    info = {
+        "nature": "dossier" if isinstance(item, Matter) else "tâche",
+        "titre": item.title if isinstance(item, Task) else item.name,
+        "description": item.description,
+        "domaine": item.specialty.name if item.specialty else None,
+        "sous_specialite": item.sub_specialty.name if item.sub_specialty else None,
+        "type": TASK_TYPES[item.task_type][0] if item.task_type else None,
+        "complexite": item.complexity,
+        "charge_estimee_heures": item.estimated_hours,
+        "echeance": item.deadline.strftime("%d/%m/%Y"),
+        "jours_avant_echeance": max(0, (item.deadline - now).days),
+        "niveau_hierarchique_minimum": ROLE.get(item.min_level),
+        "langue_obligatoire": item.required_language,
+        "juridiction_obligatoire": item.required_jurisdiction,
+        "pays": item.country or client.country,
+        "systeme_juridique": item.legal_system or DEFAULT_LEGAL_SYSTEM,
+        # Le nom du client n'est pas transmis (pseudonymisation)
+        "client": {"secteur": client.sector, "langue": client.language, "pays": client.country},
+    }
+    if isinstance(item, Matter):
+        info["priorite_cabinet"] = item.priority
+        info["equipe_actuelle"] = [f"{m.user.name} ({ROLE[m.user.role]})" for m in item.members]
+    else:
+        info["dossier"] = item.matter.name
+    return info
+
+
+def profile_info(db: Session, c: Candidate, item: Item, now: datetime) -> dict:
+    u = c.user
+    load = workload(db, u, item)
+    return {
+        "id": u.id,
+        "nom": u.name,
+        "niveau": ROLE[u.role],
+        "anciennete_cabinet_ans": u.years_at_firm(now.date()),
+        "annees_de_barreau": u.years_at_bar(now.date()) if u.bar_year else None,
+        "specialisation": u.bio,
+        "domaines": {us.specialty.name: {"niveau": SPECIALTY_LEVEL[us.level], "dossiers_traites": us.cases_count}
+                     for us in u.specialties},
+        "sous_specialites": {us.sub_specialty.name: {"niveau": SPECIALTY_LEVEL[us.level],
+                                                     "dossiers_traites": us.cases_count} for us in u.sub_specialties},
+        "langues": u.languages,
+        "secteurs_maitrises": u.sectors,
+        "pays_maitrises": u.countries,
+        "systemes_juridiques": u.legal_systems,
+        "preferences": u.preferences,
+        "experience": {"contentieuse": f"{u.litigation_level}/3", "transactionnelle": f"{u.transactional_level}/3",
+                       "internationale": f"{u.international_level}/2"},
+        "charge_en_cours": [{"titre": x.title if isinstance(x, Task) else x.name,
+                             "echeance": x.deadline.strftime("%d/%m"), "heures_restantes": round(h, 1)}
+                            for x, h in load],
+        "dossiers_de_ses_equipes": [x.name if isinstance(x, Matter) else x.title for x in history(db, u, item)][:12],
+        "heures_libres_avant_echeance": c.free_hours,
+        "fin_estimee": c.estimated_finish.strftime("%d/%m %Hh") if c.estimated_finish else "au-delà de 60 jours",
+        "cout_estime_euros_ht": c.estimated_cost,
+        "criteres_calcules": [{"critere": cr.label, "groupe": "principal" if cr.tier == "main" else "complémentaire",
+                               "rang": cr.rank, "detail": cr.detail} for cr in c.criteria if cr.value is not None],
+    }
+
+
+def hierarchy_info() -> dict:
+    return {
+        "1_eliminatoires_dans_l_ordre": list(ELIMINATORY.values()),
+        "2_principaux_dans_l_ordre": list(MAIN_CRITERIA.values()),
+        "3_complementaires_dans_l_ordre": list(COMPLEMENTARY_CRITERIA.values()),
+        "regles": ["Les critères principaux priment sur les complémentaires.",
+                   "Dans chaque groupe, un critère mieux classé pèse davantage.",
+                   "Une charge de travail plus élevée qu'un autre candidat n'est pas éliminatoire mais pénalise "
+                   "fortement."],
+    }
 
 
 # --------------------------------------------------------------------------- classement
 
-def rank_candidates(db: Session, task: Item, role: str, now: datetime, explain: bool = True) -> list[Candidate]:
-    """Classe les personnes du rôle `role` pour un dossier (collaborateurs) ou une tâche (stagiaires)."""
-    users = list(db.scalars(select(User).where(User.role == role).order_by(User.name)))
-    client = task.client
+def _cache_key(item: Item) -> str:
+    return f"{'matter' if isinstance(item, Matter) else 'task'}:{item.id}"
+
+
+def _fingerprint(db: Session, item: Item, eligible: list[Candidate]) -> str:
+    """Empreinte des informations qui changent le classement : élément, équipe, candidats éligibles et leur charge."""
+    data = {
+        "item": [item.specialty_id, item.sub_specialty_id, item.task_type, item.estimated_hours,
+                 item.deadline.isoformat(), item.min_level, item.required_language, item.description],
+        "team": [m.user_id for m in item.members] if isinstance(item, Matter) else [],
+        "candidates": {str(c.user.id): sorted(f"{'m' if isinstance(x, Matter) else 't'}{x.id}"
+                                              for x, _ in workload(db, c.user, item)) for c in eligible},
+    }
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
+def forget_ranking(db: Session, item: Item) -> None:
+    row = db.get(RankingCache, _cache_key(item))
+    if row:
+        db.delete(row)
+        db.flush()
+
+
+def _apply(eligible: list[Candidate], payload: dict) -> list[Candidate]:
+    by_id = {c.user.id: c for c in eligible}
+    ordered = []
+    for uid in payload["order"]:
+        c = by_id.pop(uid, None)
+        if c:
+            c.score = payload["scores"].get(str(uid), c.score)
+            c.explanation = payload["reasons"].get(str(uid), "")
+            ordered.append(c)
+    return ordered + sorted(by_id.values(), key=lambda c: -c.score)  # oubliés par l'IA : à la fin
+
+
+def _ai_ranking(db: Session, item: Item, eligible: list[Candidate], excluded: list[Candidate], now: datetime,
+                refresh: bool) -> list[Candidate] | None:
+    key, fingerprint = _cache_key(item), _fingerprint(db, item, eligible)
+    cached = db.get(RankingCache, key)
+    fresh = cached and cached.fingerprint == fingerprint and now - cached.created_at < timedelta(hours=CACHE_HOURS)
+    if fresh and not refresh:
+        return _apply(eligible, json.loads(cached.payload))
+    context = {
+        "a_pourvoir": item_info(item, now),
+        "hierarchie_des_criteres": hierarchy_info(),
+        "candidats_eligibles": [profile_info(db, c, item, now) for c in eligible],
+        "exclus_par_un_critere_eliminatoire": {c.user.name: c.eliminated for c in excluded},
+    }
+    result = ai.rank_candidates(context, [c.user.id for c in eligible])
+    if result is None:  # Mistral indisponible : dernier classement connu s'il correspond encore, sinon calcul local
+        return _apply(eligible, json.loads(cached.payload)) if cached and cached.fingerprint == fingerprint else None
+    payload = json.dumps(result, ensure_ascii=False)
+    if cached:
+        cached.fingerprint, cached.payload, cached.created_at = fingerprint, payload, now
+    else:
+        db.add(RankingCache(key=key, fingerprint=fingerprint, payload=payload, created_at=now))
+    db.flush()
+    return _apply(eligible, result)
+
+
+def rank_candidates(db: Session, item: Item, now: datetime | None = None, use_ai: bool = True,
+                    refresh: bool = False) -> Ranking:
+    """Classe les collaborateurs (dossier) ou les stagiaires (tâche). Les membres de l'équipe sont écartés."""
+    now = now or clock.now(db)
+    users = list(db.scalars(select(User).where(User.role.in_(pool_for(item))).order_by(User.name)))
+    if isinstance(item, Matter):
+        users = [u for u in users if not item.has_member(u)]
+    client = item.client
     conflicts = {c.user_id: c.reason for c in db.scalars(select(Conflict).where(Conflict.client_id == client.id))}
-    ensure_embeddings(db, task, users)
-    _, task_vec = _load(task.embedding)
 
     candidates = []
     for user in users:
         c = Candidate(user=user)
-        c.free_hours = free_hours(db, user, now, task.deadline, exclude=task)
-        c.active_tasks = len(workload(db, user, task))
-        c.estimated_cost = round(task.estimated_hours * user.hourly_rate, 2)
-        c.eliminations = _eliminations(db, user, task, client, conflicts, c.free_hours)
+        c.free_hours = free_hours(db, user, now, item.deadline, exclude=item)
+        c.active_tasks = len(workload(db, user, item))
+        c.estimated_cost = round(item.estimated_hours * user.hourly_rate, 2)
+        c.eliminations = _eliminations(user, item, conflicts, c.free_hours)
         candidates.append(c)
 
     eligible = [c for c in candidates if not c.eliminations]
-    sims = {c.user.id: max(0.0, ai.cosine(task_vec, _load(c.user.profile_embedding)[1])) for c in eligible}
-    best_sim = max(sims.values(), default=0) or 1.0
+    excluded = sorted((c for c in candidates if c.eliminations),
+                      key=lambda c: list(ELIMINATORY).index(c.eliminations[0][0]))
     max_free = max((c.free_hours for c in eligible), default=0)
-
     for c in eligible:
-        c.criteria = (_main_criteria(db, c, task, client, now, sims[c.user.id] / best_sim, max_free)
-                      + _complementary_criteria(c, task, client, now))
-        c.score = _final_score(c.criteria)
-        c.estimated_finish = estimated_finish(db, c.user, task, now)
-        _badges(c, task)
+        c.criteria = (_main_criteria(db, c, item, client, now, max_free)
+                      + _complementary_criteria(c, item, client, now))
+        c.score = local_score(c.criteria)
+        c.estimated_finish = estimated_finish(db, c.user, item, now)
+    eligible.sort(key=lambda c: (-c.score, *[-(cr.value or 0) for cr in c.criteria]))
 
-    eligible.sort(key=_sort_key)
-    eliminated = sorted((c for c in candidates if c.eliminations),
-                        key=lambda c: list(ELIMINATORY).index(c.eliminations[0][0]))
-
-    if explain and eligible:
-        task_info = {
-            "titre": task.title,
-            "specialite": task.specialty.name if task.specialty else None,
-            "sous_specialite": task.sub_specialty.name if task.sub_specialty else None,
-            "effort_estime_heures": task.estimated_hours,
-            "jours_avant_deadline": max(0, (task.deadline - now).days),
-        }
-        payload = [{"id": c.user.id, "name": c.user.name, "score": c.score, "facts": c.facts[:8]}
-                   for c in eligible[:MAX_EXPLAINED]]
-        explanations = ai.explain_ranking(task_info, payload)
-        fallback = ai.explain_locally([{"id": c.user.id, "facts": c.facts} for c in eligible[MAX_EXPLAINED:]])
+    result = Ranking()
+    if use_ai and eligible:
+        ranked = _ai_ranking(db, item, eligible, excluded, now, refresh)
+        if ranked is not None:
+            eligible, result.source = ranked, "mistral"
+    if result.source == "local":
+        local = ai.explain_locally([{"id": c.user.id, "facts": c.facts} for c in eligible])
         for c in eligible:
-            c.explanation = explanations.get(c.user.id) or fallback.get(c.user.id, "")
-    return eligible + eliminated
-
-
-def _badges(c: Candidate, task: Item) -> None:
-    sub = c.criterion("sub_level")
-    dom = c.criterion("domain_level")
-    if sub and sub.value:
-        c.badges.append(f"{task.sub_specialty.name} · {SPECIALTY_LEVEL[round(sub.value * 3)]}")
-    elif dom and dom.value:
-        c.badges.append(f"{task.specialty.name} · {SPECIALTY_LEVEL[round(dom.value * 3)]}")
-    if c.free_hours >= 1.5 * task.estimated_hours:
-        c.badges.append("Disponible")
-    if (k := c.criterion("client_knowledge")) and k.value:
-        c.badges.append("Connaît le client")
-    if (lang := c.criterion("client_language")) and lang.value:
-        c.badges.append("Parle la langue du client")
+            c.explanation = local.get(c.user.id, "")
+    result.extend(eligible + excluded)
+    return result
 
 
 def compare(a: Candidate, b: Candidate, threshold: float = 0.15) -> list[tuple[Criterion, Criterion]]:
@@ -502,6 +574,6 @@ def compare(a: Candidate, b: Candidate, threshold: float = 0.15) -> list[tuple[C
     return out
 
 
-def eligible_ids(db: Session, task: Item, role: str, now: datetime) -> dict[int, str | None]:
-    """{user_id: motif d'élimination ou None} — utilisé pour valider côté serveur les choix de l'utilisateur."""
-    return {c.user.id: c.eliminated for c in rank_candidates(db, task, role, now, explain=False)}
+def eligible_ids(db: Session, item: Item, now: datetime | None = None) -> dict[int, str | None]:
+    """{user_id: motif d'élimination ou None} — validation côté serveur des choix de l'utilisateur."""
+    return {c.user.id: c.eliminated for c in rank_candidates(db, item, now, use_ai=False)}

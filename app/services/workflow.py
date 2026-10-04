@@ -1,11 +1,12 @@
 """Cycle de vie des dossiers et des tâches.
 
-DOSSIER (attribué par l'associé) :
-    À ATTRIBUER -> EN PROPOSITION (collaborateur n°1 -> n°2 -> n°3)
-        accepté   -> EN COURS (le collaborateur devient responsable du dossier) -> CLÔTURÉ
+DOSSIER : une ÉQUIPE (un ou plusieurs associés, des collaborateurs, des stagiaires) travaille dessus.
+    À ATTRIBUER (aucun collaborateur) -> EN PROPOSITION (collaborateur n°1 -> n°2 -> n°3)
+        accepté   -> EN COURS (le collaborateur rejoint l'équipe) -> CLÔTURÉ
         3 refus   -> REFUSÉ PAR TOUS -> l'associé refait une sélection (round suivant)
+    Un associé de l'équipe peut à tout moment proposer le dossier à un collaborateur de plus (même cascade).
 
-TÂCHE (créée par le collaborateur responsable, dans un de ses dossiers) :
+TÂCHE (créée par un collaborateur de l'équipe) :
     À LANCER -> « je la fais »   -> EN COURS -> TERMINÉE
              -> « je délègue »   -> DÉLÉGATION EN ATTENTE -> EN COURS (stagiaire) -> EN REVUE -> TERMINÉE
                                     (refus du stagiaire : retour à À LANCER)
@@ -17,8 +18,8 @@ from sqlalchemy.orm import Session
 
 from app import clock, config
 from app.labels import refusal
-from app.models import (Client, Delegation, DelegationStatus, Matter, MatterStatus, Proposal, ProposalStatus, Role,
-                        Task, TaskStatus, User)
+from app.models import (Client, Delegation, DelegationStatus, Matter, MatterMember, MatterStatus, Proposal,
+                        ProposalStatus, Role, Task, TaskStatus, TeamRole, User)
 from app.services.notifications import log_event, notify
 from app.services.scoring import eligible_ids
 
@@ -32,9 +33,20 @@ def _require(condition: bool, message: str) -> None:
         raise WorkflowError(message)
 
 
-def _eligibility(db: Session, item: Matter | Task, role: str) -> dict[int, str | None]:
+def _eligibility(db: Session, item: Matter | Task) -> dict[int, str | None]:
     """{user_id: motif d'élimination ou None}. Les critères éliminatoires sont revérifiés côté serveur."""
-    return eligible_ids(db, item, role, clock.now(db))
+    return eligible_ids(db, item, clock.now(db))
+
+
+def add_member(db: Session, matter: Matter, user: User, team_role: str) -> None:
+    if not matter.has_member(user):
+        matter.members.append(MatterMember(matter_id=matter.id, user_id=user.id, team_role=team_role,
+                                           joined_at=clock.now(db)))
+        db.flush()
+
+
+def is_partner_of(matter: Matter, user: User) -> bool:
+    return matter.created_by_id == user.id or matter.has_member(user, TeamRole.PARTNER)
 
 
 def min_choices(eligible_count: int) -> int:
@@ -69,10 +81,10 @@ def create_matter(db: Session, partner: User, *, name: str, description: str, cl
                   estimated_hours: float, specialty_id: int | None = None, sub_specialty_id: int | None = None,
                   task_type: str | None = None, complexity: int = 2,
                   notify_days_before: int = config.NOTIFY_DAYS_BEFORE_DEFAULT, ai_summary: str | None = None,
-                  min_level: str = Role.ASSOCIATE, required_language: str | None = None,
+                  min_level: str = Role.JUNIOR, required_language: str | None = None,
                   required_jurisdiction: str | None = None, country: str | None = None,
-                  legal_system: str | None = None) -> Matter:
-    _require(partner.is_assigner, "Seul un associé ou un partner peut ouvrir un dossier.")
+                  legal_system: str | None = None, co_partner_ids: list[int] | None = None) -> Matter:
+    _require(partner.is_assigner, "Seul un associé peut ouvrir un dossier.")
     _require(bool(name.strip()), "Le nom du dossier est obligatoire.")
     _require(db.get(Client, client_id) is not None, "Client inconnu.")
     _require(deadline > clock.now(db), "L'échéance doit être dans le futur.")
@@ -86,6 +98,11 @@ def create_matter(db: Session, partner: User, *, name: str, description: str, cl
                     **_requirements(min_level, required_language, required_jurisdiction, country, legal_system))
     db.add(matter)
     db.flush()
+    add_member(db, matter, partner, TeamRole.PARTNER)
+    for uid in co_partner_ids or []:
+        other = db.get(User, uid)
+        if other and other.is_assigner:
+            add_member(db, matter, other, TeamRole.PARTNER)
     log_event(db, matter, "created", f"Dossier ouvert par {partner.name}", partner)
     return matter
 
@@ -100,14 +117,17 @@ def current_proposal(matter: Matter) -> Proposal | None:
 
 def start_proposals(db: Session, matter: Matter, partner: User, user_ids: list[int],
                     scores: dict[int, float] | None = None) -> None:
-    """L'associé valide sa sélection ordonnée : on crée les propositions et on envoie le dossier au n°1."""
-    _require(partner.id == matter.created_by_id, "Seul l'associé responsable du dossier peut l'attribuer.")
-    _require(matter.status in (MatterStatus.TO_ASSIGN, MatterStatus.CASCADE_FAILED), "Ce dossier est déjà attribué.")
+    """Un associé de l'équipe valide sa sélection ordonnée : on crée les propositions et on envoie au n°1.
+    Possible pour un dossier à attribuer comme pour un dossier en cours (renfort de l'équipe)."""
+    _require(is_partner_of(matter, partner), "Seuls les associés du dossier peuvent l'attribuer.")
+    _require(matter.status != MatterStatus.CLOSED, "Ce dossier est clôturé.")
+    _require(current_proposal(matter) is None, "Une proposition est déjà en attente de réponse sur ce dossier.")
     ordered = list(dict.fromkeys(user_ids))  # dédoublonne en gardant l'ordre
     users = [db.get(User, uid) for uid in ordered]
     for user in users:
-        _require(user is not None and user.role == Role.ASSOCIATE, "Seuls des collaborateurs peuvent être choisis.")
-    eligibility = _eligibility(db, matter, Role.ASSOCIATE)
+        _require(user is not None and user.is_lawyer, "Seuls des collaborateurs peuvent être choisis.")
+        _require(not matter.has_member(user), f"{user.name} fait déjà partie de l'équipe.")
+    eligibility = _eligibility(db, matter)
     for user in users:
         _require(eligibility.get(user.id) is None, f"{user.name} est exclu : {eligibility.get(user.id)}.")
     needed = min_choices(sum(1 for reason in eligibility.values() if reason is None))
@@ -117,7 +137,8 @@ def start_proposals(db: Session, matter: Matter, partner: User, user_ids: list[i
     for rank, user in enumerate(users, start=1):
         matter.proposals.append(Proposal(matter_id=matter.id, user_id=user.id, round=round_no, rank=rank,
                                          status=ProposalStatus.QUEUED, score=(scores or {}).get(user.id)))
-    matter.status = MatterStatus.PROPOSING
+    if not matter.lawyers:
+        matter.status = MatterStatus.PROPOSING
     db.flush()
     names = " → ".join(u.name for u in users)
     log_event(db, matter, "selection", f"Sélection validée par {partner.name} : {names}", partner)
@@ -128,11 +149,13 @@ def _activate_next(db: Session, matter: Matter) -> None:
     round_no = current_round(matter)
     queued = [p for p in matter.proposals if p.round == round_no and p.status == ProposalStatus.QUEUED]
     if not queued:
-        matter.status = MatterStatus.CASCADE_FAILED
-        log_event(db, matter, "cascade_failed", "Aucun des collaborateurs choisis n'a accepté : retour à l'associé")
-        notify(db, matter.created_by, "cascade_failed",
-               f"Personne n'a accepté le dossier « {matter.name} ». Choisissez de nouveaux collaborateurs.",
-               matter, link=f"/matters/{matter.id}/assign", email_subject=f"Dossier non attribué : {matter.name}")
+        # Équipe déjà en place (renfort refusé) : le dossier reste en cours ; sinon retour à l'associé
+        matter.status = MatterStatus.ACTIVE if matter.lawyers else MatterStatus.CASCADE_FAILED
+        log_event(db, matter, "cascade_failed", "Aucun des collaborateurs choisis n'a accepté")
+        for partner in matter.partners:
+            notify(db, partner, "cascade_failed",
+                   f"Personne n'a accepté le dossier « {matter.name} ». Choisissez d'autres collaborateurs.",
+                   matter, link=f"/matters/{matter.id}/assign", email_subject=f"Dossier non attribué : {matter.name}")
         db.flush()
         return
     proposal = min(queued, key=lambda p: p.rank)
@@ -144,7 +167,7 @@ def _activate_next(db: Session, matter: Matter) -> None:
     log_event(db, matter, "proposed", f"Proposé à {proposal.user.name} (choix n°{proposal.rank})")
     # Le collaborateur ne voit pas son rang : il ne sait pas s'il est le premier choix.
     notify(db, proposal.user, "proposal",
-           f"{matter.created_by.name} vous propose le dossier « {matter.name} » (échéance "
+           f"{', '.join(p.name for p in matter.partners)} vous propose(nt) le dossier « {matter.name} » (échéance "
            f"{matter.deadline:%d/%m à %Hh%M}). Réponse attendue avant le {proposal.expires_at:%d/%m à %Hh%M}.",
            matter, email_subject=f"Nouveau dossier proposé : {matter.name}")
 
@@ -165,13 +188,15 @@ def accept_proposal(db: Session, proposal_id: int, user: User) -> Matter:
     for p in matter.proposals:
         if p.round == proposal.round and p.status == ProposalStatus.QUEUED:
             p.status = ProposalStatus.CANCELLED
+    add_member(db, matter, user, TeamRole.LAWYER)
     matter.status = MatterStatus.ACTIVE
-    matter.assignee_id = user.id
-    matter.budget_amount = round(matter.estimated_hours * user.hourly_rate, 2)
+    if matter.budget_amount is None:
+        matter.budget_amount = round(matter.estimated_hours * user.hourly_rate, 2)
     db.flush()
-    log_event(db, matter, "accepted", f"Dossier accepté par {user.name}", user)
-    notify(db, matter.created_by, "accepted", f"{user.name} a accepté le dossier « {matter.name} ».", matter,
-           email_subject=f"Dossier accepté : {matter.name}")
+    log_event(db, matter, "accepted", f"{user.name} rejoint l'équipe du dossier", user)
+    for partner in matter.partners:
+        notify(db, partner, "accepted", f"{user.name} a accepté le dossier « {matter.name} ».", matter,
+               email_subject=f"Dossier accepté : {matter.name}")
     return matter
 
 
@@ -205,16 +230,17 @@ def expire_proposals(db: Session, now: datetime) -> int:
 
 def close_matter(db: Session, matter: Matter, user: User) -> None:
     _require(matter.status == MatterStatus.ACTIVE, "Seul un dossier en cours peut être clôturé.")
-    _require(user.id in (matter.assignee_id, matter.created_by_id),
-             "Seuls le collaborateur responsable et l'associé peuvent clôturer le dossier.")
+    _require(matter.has_member(user, TeamRole.PARTNER) or matter.has_member(user, TeamRole.LAWYER),
+             "Seuls les associés et les collaborateurs de l'équipe peuvent clôturer le dossier.")
     open_tasks = [t for t in matter.tasks if t.status in TaskStatus.OPEN]
     _require(not open_tasks, f"{len(open_tasks)} tâche(s) encore ouverte(s) dans ce dossier.")
     matter.status = MatterStatus.CLOSED
     matter.closed_at = clock.now(db)
     db.flush()
     log_event(db, matter, "closed", f"Dossier clôturé par {user.name}", user)
-    other = matter.created_by if user.id == matter.assignee_id else matter.assignee
-    notify(db, other, "closed", f"Le dossier « {matter.name} » a été clôturé.", matter)
+    for member in matter.partners + matter.lawyers:
+        if member.id != user.id:
+            notify(db, member, "closed", f"Le dossier « {matter.name} » a été clôturé.", matter)
 
 
 # =========================================================================== TÂCHES
@@ -225,10 +251,11 @@ def create_task(db: Session, user: User, matter: Matter, *, title: str, descript
                 min_level: str = Role.INTERN, required_language: str | None = None,
                 required_jurisdiction: str | None = None, country: str | None = None,
                 legal_system: str | None = None) -> Task:
-    """Le collaborateur responsable crée une tâche dans son dossier. Domaine et sous-spécialité reprennent ceux
+    """Un collaborateur de l'équipe crée une tâche dans le dossier. Domaine et sous-spécialité reprennent ceux
     du dossier s'ils ne sont pas précisés (ils servent au choix du stagiaire)."""
     _require(matter.status == MatterStatus.ACTIVE, "On ne peut créer des tâches que dans un dossier en cours.")
-    _require(user.id == matter.assignee_id, "Seul le collaborateur responsable du dossier peut y créer des tâches.")
+    _require(matter.has_member(user, TeamRole.LAWYER),
+             "Seuls les collaborateurs de l'équipe du dossier peuvent y créer des tâches.")
     _require(bool(title.strip()), "Le titre est obligatoire.")
     _require(deadline > clock.now(db), "La deadline doit être dans le futur.")
     _require(estimated_hours > 0, "L'effort estimé doit être positif.")
@@ -262,7 +289,7 @@ def delegate(db: Session, task: Task, user: User, intern_id: int) -> Delegation:
     _require_assignee(task, user, TaskStatus.ACCEPTED)
     intern = db.get(User, intern_id)
     _require(intern is not None and intern.role == Role.INTERN, "On ne peut déléguer qu'à un stagiaire.")
-    reason = _eligibility(db, task, Role.INTERN).get(intern.id)
+    reason = _eligibility(db, task).get(intern.id)
     _require(reason is None, f"{intern.name} est exclu·e : {reason}.")
     delegation = Delegation(task_id=task.id, from_user_id=user.id, to_user_id=intern.id,
                             status=DelegationStatus.PENDING, created_at=clock.now(db))
@@ -295,6 +322,7 @@ def accept_delegation(db: Session, delegation_id: int, intern: User) -> Task:
     task = delegation.task
     task.delegate_id = intern.id
     task.status = TaskStatus.IN_PROGRESS
+    add_member(db, task.matter, intern, TeamRole.INTERN)  # le stagiaire rejoint l'équipe du dossier
     db.flush()
     log_event(db, task, "delegation_accepted", f"{intern.name} a accepté « {task.title} »", intern)
     notify(db, delegation.from_user, "delegation_accepted", f"{intern.name} a accepté « {task.title} ».", task)

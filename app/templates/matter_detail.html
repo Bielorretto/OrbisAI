@@ -2,7 +2,8 @@
 {% from "macros.html" import status, deadline, timeline, assistant %}
 {% block title %}{{ matter.name }}{% endblock %}
 {% block content %}
-{% set is_owner = user.id == matter.assignee_id and matter.status == 'active' %}
+{% set is_owner = matter.has_member(user, 'collaborateur') and matter.status == 'active' %}
+{% set is_partner = matter.has_member(user, 'associe') or user.id == matter.created_by_id %}
 <div class="page-head">
   <div>
     <h1>{{ matter.name }}</h1>
@@ -10,10 +11,10 @@
       <span>{{ status(matter) }}</span>
       <span>Client <strong>{{ matter.client.name }}</strong></span>
       <span>Échéance <strong>{{ deadline(matter, now) }}</strong></span>
-      {% if matter.assignee %}<span>Collaborateur <strong>{{ matter.assignee.name }}</strong></span>{% endif %}
+      {% if matter.priority %}<span>Priorité <strong>{{ matter.priority }}</strong></span>{% endif %}
     </div>
   </div>
-  {% if user.id == matter.created_by_id and matter.status in ('to_assign', 'cascade_failed') %}
+  {% if is_partner and matter.status in ('to_assign', 'cascade_failed') %}
     <a class="btn primary" href="/matters/{{ matter.id }}/assign">Attribuer</a>
   {% elif is_owner %}
     <a class="btn primary" href="/matters/{{ matter.id }}/tasks/new">+ Nouvelle tâche</a>
@@ -35,6 +36,19 @@
     </div>
   </section>
 {% endif %}
+
+<section class="card">
+  <div class="actions" style="justify-content: space-between">
+    <h2>Équipe</h2>
+    {% if is_partner and matter.status == 'active' and not current %}<a class="btn small" href="/matters/{{ matter.id }}/assign">+ Ajouter un collaborateur</a>{% endif %}
+  </div>
+  <ul class="rows">
+    {% for mb in matter.members %}
+      <li><span class="grow">{{ mb.user.name }}</span><span class="tag">{{ labels.ROLE[mb.user.role] }}</span></li>
+    {% endfor %}
+    {% if current %}<li><span class="grow muted">{{ current.user.name }}</span><span class="tag">proposition en attente</span></li>{% endif %}
+  </ul>
+</section>
 
 {% if matter.status in ('active', 'closed') %}
   <section class="card">
@@ -83,7 +97,7 @@
   <div style="margin-top: .75rem">{{ timeline(matter.events) }}</div>
 </details>
 
-{% if matter.status == 'active' and user.id in (matter.assignee_id, matter.created_by_id) %}
+{% if matter.status == 'active' and (is_partner or is_owner) %}
   <form method="post" action="/matters/{{ matter.id }}/close" onsubmit="return confirm('Clôturer ce dossier ?')">
     <button class="btn small">Clôturer le dossier</button>
   </form>

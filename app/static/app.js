@@ -1,4 +1,47 @@
-// Petits comportements côté navigateur : panneau latéral, chronomètres, sélection ordonnée.
+// Petits comportements côté navigateur : identité par onglet, panneau latéral, chronomètres, sélection ordonnée.
+
+// ---------------------------------------------------------------- identité propre à chaque onglet
+// Le jeton signé reçu à la connexion (?as=…) est gardé dans sessionStorage, qui est propre à l'onglet. Il est
+// ajouté à chaque lien, formulaire et appel : on peut ouvrir associé, collaborateur et stagiaire côte à côte.
+(function () {
+  const params = new URLSearchParams(location.search);
+  if (location.pathname.startsWith("/login")) sessionStorage.removeItem("as");
+  if (params.get("as")) sessionStorage.setItem("as", params.get("as"));
+
+  // Nettoie l'adresse affichée (jeton et message de confirmation)
+  if (params.has("as") || params.has("flash")) {
+    ["as", "flash", "flash_error"].forEach((k) => params.delete(k));
+    const query = params.toString();
+    history.replaceState(null, "", location.pathname + (query ? "?" + query : "") + location.hash);
+  }
+
+  const token = sessionStorage.getItem("as");
+  if (!token) return;
+  const withToken = (url) => {
+    if (!url || !url.startsWith("/") || url.startsWith("/static") || url.startsWith("/login")) return url;
+    const u = new URL(url, location.origin);
+    u.searchParams.set("as", token);
+    return u.pathname + u.search + u.hash;
+  };
+  const tagLink = (a) => { const href = a.getAttribute("href"); if (href) a.setAttribute("href", withToken(href)); };
+
+  document.querySelectorAll("a[href]").forEach(tagLink);
+  ["click", "auxclick"].forEach((type) => document.addEventListener(type, (e) => {
+    const a = e.target.closest && e.target.closest("a[href]");
+    if (a) tagLink(a);
+  }, true));
+  document.addEventListener("submit", (e) => {
+    const form = e.target;
+    form.setAttribute("action", withToken(form.getAttribute("action") || location.pathname + location.search));
+  }, true);
+
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    const headers = new Headers(init.headers || {});
+    headers.set("X-As", token);
+    return nativeFetch(input, { ...init, headers });
+  };
+})();
 
 // ---------------------------------------------------------------- panneau latéral (fiche + agenda)
 (function () {

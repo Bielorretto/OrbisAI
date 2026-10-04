@@ -14,7 +14,7 @@
       <li>
         <div class="grow">
           <a href="/matters/{{ m.id }}" class="row-title">{{ m.name }}</a>
-          <div class="row-meta">{{ m.client.name }} · échéance {{ deadline(m, now) }}
+          <div class="row-meta">Priorité {{ m.priority }} · {{ m.client.name }} · échéance {{ deadline(m, now) }}
             {% if m.status == 'cascade_failed' %}· <span class="text-danger">refusé par tous</span>{% endif %}</div>
         </div>
         <a class="btn primary" href="/matters/{{ m.id }}/assign">Attribuer</a>
@@ -25,13 +25,20 @@
 
 {% if proposing %}
 <section class="card">
-  <h2>En attente de réponse</h2>
+  <h2>En attente de réponse <span class="count-badge">{{ proposing|length }}</span></h2>
   <ul class="rows">
-    {% for m, p in proposing %}
+    {% for m, p, earlier in proposing %}
       <li>
         <div class="grow">
           <a href="/matters/{{ m.id }}" class="row-title">{{ m.name }}</a>
-          <div class="row-meta">{% if p %}Proposé à <strong>{{ p.user.name }}</strong> · réponse avant {{ p.expires_at|dt('%d/%m %Hh%M') }}{% endif %}</div>
+          {% for q in earlier %}
+            <div class="row-meta">
+              {% if q.status == 'refused' %}<span class="text-danger">Refusé par <strong>{{ q.user.name }}</strong></span> ({{ labels.refusal(q.refusal_reason)|lower }})
+              {% else %}<span class="text-danger">Pas de réponse de <strong>{{ q.user.name }}</strong></span>{% endif %}
+              → proposé ensuite à {{ (m.proposals|selectattr('round', 'equalto', q.round)|selectattr('rank', 'equalto', q.rank + 1)|first).user.name }}
+            </div>
+          {% endfor %}
+          <div class="row-meta">En attente de <strong>{{ p.user.name }}</strong>{% if m.lawyers %} (renfort de l'équipe){% endif %} · réponse avant {{ p.expires_at|dt('%d/%m %Hh%M') }}</div>
         </div>
       </li>
     {% endfor %}
@@ -46,7 +53,7 @@
       <li>
         <div class="grow">
           <a href="/matters/{{ m.id }}" class="row-title">{{ m.name }}</a>
-          <div class="row-meta">{{ m.assignee.name }} · échéance {{ deadline(m, now) }} · {{ p.open_tasks }} tâche(s) en cours</div>
+          <div class="row-meta">{{ m.lawyers|map(attribute='name')|join(', ') }} · échéance {{ deadline(m, now) }} · {{ p.open_tasks }} tâche(s) en cours</div>
         </div>
         <div class="progress" title="{{ p.hours }} h passées sur {{ p.estimated_hours|round(1) }} h estimées">
           <div class="bar {% if p.pct >= 100 %}over{% elif p.pct >= 80 %}warn{% endif %}"><span style="width: {{ [p.pct, 100]|min }}%"></span></div>
@@ -62,7 +69,7 @@
   <summary><strong>Clôturés</strong> <span class="muted">({{ closed|length }})</span></summary>
   <ul class="rows">
     {% for m in closed %}
-      <li><a href="/matters/{{ m.id }}" class="grow">{{ m.name }}</a><span class="small muted">{{ m.assignee.name if m.assignee }}</span></li>
+      <li><a href="/matters/{{ m.id }}" class="grow">{{ m.name }}</a><span class="small muted">{{ m.lawyers|map(attribute='name')|join(', ') }}</span></li>
     {% endfor %}
   </ul>
 </details>

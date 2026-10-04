@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 from app import clock, config
 from app.db import get_db
 from app.labels import TASK_TYPES
-from app.models import Client, Matter, MatterStatus, Proposal, Role, Specialty, SubSpecialty, TimeEntry, Task, User
+from app.models import (Client, Matter, MatterStatus, Proposal, Role, Specialty, SubSpecialty, Task, TeamRole, TimeEntry,
+                        User)
 from app.routes.common import Forbidden, current_user, redirect, render, require_role
 from app.services import ai, assistant, scheduler, workflow
 from app.services.scoring import logged_hours, rank_candidates
@@ -38,7 +39,7 @@ def _get_matter(db: Session, matter_id: int) -> Matter:
 
 
 def can_view_matter(matter: Matter, user: User) -> bool:
-    involved = {matter.created_by_id, matter.assignee_id} | {p.user_id for p in matter.proposals}
+    involved = {matter.created_by_id} | {m.user_id for m in matter.members} | {p.user_id for p in matter.proposals}
     return user.is_assigner or user.id in involved
 
 
@@ -149,16 +150,18 @@ def matter_detail(matter_id: int, request: Request, db: Session = Depends(get_db
 
 @router.get("/matters/{matter_id}/assign")
 def assign_page(matter_id: int, request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    require_role(user, *Role.ASSIGNERS)
     matter = _get_matter(db, matter_id)
-    if matter.status not in (MatterStatus.TO_ASSIGN, MatterStatus.CASCADE_FAILED):
-        return redirect(f"/matters/{matter.id}", "Ce dossier est déjà attribué.")
-    candidates = rank_candidates(db, matter, Role.ASSOCIATE, clock.now(db))
-    db.commit()  # embeddings calculés et stockés
+    if not workflow.is_partner_of(matter, user):
+        return redirect(f"/matters/{matter.id}", "Seuls les associés du dossier peuvent l'attribuer.", error=True)
+    if matter.status == MatterStatus.CLOSED or workflow.current_proposal(matter):
+        return redirect(f"/matters/{matter.id}", "Une proposition est déjà en attente de réponse sur ce dossier.")
+    refresh = request.query_params.get("refresh") == "1"
+    candidates = rank_candidates(db, matter, clock.now(db), refresh=refresh)
+    db.commit()  # classement Mistral mémorisé
     refused = {p.user_id for p in matter.proposals}
     eligible = sum(1 for c in candidates if not c.eliminated)
     return render(request, "assign.html", db, user, matter=matter, candidates=candidates, refused=refused,
-                  min_choices=workflow.min_choices(eligible), eligible_count=eligible,
+                  min_choices=workflow.min_choices(eligible), eligible_count=eligible, source=candidates.source,
                   response_delay=config.RESPONSE_DELAY_HOURS,
                   assistant_suggestions=assistant.suggestions(candidates, Role.ASSOCIATE))
 
@@ -203,8 +206,9 @@ def refuse(proposal_id: int, reason: str = Form(...), comment: str = Form(""), d
 @router.get("/matters/{matter_id}/tasks/new")
 def new_task(matter_id: int, request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
     matter = _get_matter(db, matter_id)
-    if matter.assignee_id != user.id or matter.status != MatterStatus.ACTIVE:
-        return redirect(f"/matters/{matter_id}", "Seul le collaborateur responsable peut créer des tâches.", error=True)
+    if not matter.has_member(user, TeamRole.LAWYER) or matter.status != MatterStatus.ACTIVE:
+        return redirect(f"/matters/{matter_id}", "Seuls les collaborateurs de l'équipe peuvent créer des tâches.",
+                        error=True)
     specialties, subs, _ = specialty_tree(db)
     return render(request, "task_new.html", db, user, matter=matter, specialties=specialties, subs=subs,
                   task_types=TASK_TYPES)
@@ -213,7 +217,7 @@ def new_task(matter_id: int, request: Request, db: Session = Depends(get_db), us
 @router.post("/tasks/analyze")
 def analyze_task(title: str = Form(""), description: str = Form(""), db: Session = Depends(get_db),
                  user: User = Depends(current_user)):
-    require_role(user, Role.ASSOCIATE)
+    require_role(user, *Role.LAWYERS)
     return analyze_payload(db, title, description)
 
 

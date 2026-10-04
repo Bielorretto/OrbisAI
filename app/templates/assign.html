@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import criteria_table, assistant %}
+{% from "macros.html" import criteria_table, assistant, ranking_source %}
 {% block title %}Attribuer · {{ matter.name }}{% endblock %}
 {% block content %}
 {% set eligible = candidates|rejectattr('eliminated')|list %}
@@ -7,7 +7,8 @@
 <div class="page-head">
   <div>
     <a class="small muted" href="/matters/{{ matter.id }}">← {{ matter.name }}</a>
-    <h1>Collaborateur</h1>
+    <h1>{{ 'Ajouter un collaborateur' if matter.lawyers else 'Collaborateur' }}</h1>
+    {% if matter.lawyers %}<p class="subtitle">Équipe actuelle : {{ matter.lawyers|map(attribute='name')|join(', ') }}</p>{% endif %}
   </div>
 </div>
 
@@ -17,6 +18,7 @@
 
 <div class="layout-side">
   <section>
+    {{ ranking_source(source, "/matters/" ~ matter.id ~ "/assign") }}
     {% for c in eligible %}
       <article class="candidate" data-id="{{ c.user.id }}" data-name="{{ c.user.name }}">
         <div class="rank">{{ loop.index }}</div>

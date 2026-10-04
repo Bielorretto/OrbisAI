@@ -22,7 +22,8 @@ def _get_task(db: Session, task_id: int) -> Task:
 
 
 def _can_view(task: Task, user: User) -> bool:
-    involved = {task.assignee_id, task.delegate_id, task.matter.assignee_id} | {d.to_user_id for d in task.delegations}
+    involved = ({task.assignee_id, task.delegate_id} | {m.user_id for m in task.matter.members}
+                | {d.to_user_id for d in task.delegations})
     return user.is_assigner or user.id in involved
 
 
@@ -60,10 +61,12 @@ def delegate_page(task_id: int, request: Request, db: Session = Depends(get_db),
     task = _get_task(db, task_id)
     if task.assignee_id != user.id or task.status != TaskStatus.ACCEPTED:
         return redirect(f"/tasks/{task_id}", "Délégation impossible dans l'état actuel.", error=True)
-    candidates = rank_candidates(db, task, Role.INTERN, clock.now(db))
+    refresh = request.query_params.get("refresh") == "1"
+    candidates = rank_candidates(db, task, clock.now(db), refresh=refresh)
     db.commit()
     refused = {d.to_user_id for d in db.scalars(select(Delegation).where(Delegation.task_id == task.id))}
     return render(request, "delegate.html", db, user, task=task, candidates=candidates, refused=refused,
+                  source=candidates.source,
                   assistant_suggestions=assistant.suggestions(candidates, Role.INTERN))
 
 
