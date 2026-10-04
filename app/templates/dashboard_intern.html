@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% from "macros.html" import deadline %}
+{% block title %}Mes tâches{% endblock %}
+{% block content %}
+<div class="page-head"><h1>Bonjour {{ user.name.split(' ')[0] }}</h1></div>
+
+{% if delegations %}
+<section class="card highlight">
+  <h2>On vous confie {{ 'une tâche' if delegations|length == 1 else delegations|length ~ ' tâches' }}</h2>
+  <ul class="rows">
+    {% for d in delegations %}
+      <li>
+        <div class="grow">
+          <a href="/tasks/{{ d.task.id }}" class="row-title">{{ d.task.title }}</a>
+          <div class="row-meta">{{ d.from_user.name }} · {{ d.task.matter.name }} · {{ deadline(d.task, now) }} · {{ d.task.estimated_hours|round(1) }} h</div>
+        </div>
+        <form method="post" action="/delegations/{{ d.id }}/accept"><button class="btn ok">Accepter</button></form>
+        <form method="post" action="/delegations/{{ d.id }}/refuse" class="actions">
+          <select name="reason" aria-label="Motif du refus" style="width: auto">
+            {% for k, v in labels.REFUSAL_REASONS.items() if k != 'conflict' %}<option value="{{ k }}">{{ v }}</option>{% endfor %}
+          </select>
+          <button class="btn">Refuser</button>
+        </form>
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Mes tâches</h2>
+  <ul class="rows">
+    {% for t in working %}
+      <li>
+        <div class="grow">
+          <a href="/tasks/{{ t.id }}" class="row-title">{{ t.title }}</a>
+          <div class="row-meta">{{ t.matter.name }} · confiée par {{ t.assignee.name }} · {{ deadline(t, now) }}</div>
+        </div>
+        {% if t.status == 'in_review' %}
+          <span class="tag">En relecture chez {{ t.assignee.name }}</span>
+        {% else %}
+          <form method="post" action="/timer/start"><input type="hidden" name="task_id" value="{{ t.id }}"><input type="hidden" name="next" value="/"><button class="btn">⏱ Chrono</button></form>
+          <form method="post" action="/tasks/{{ t.id }}/submit-review"><button class="btn primary">J'ai terminé</button></form>
+        {% endif %}
+      </li>
+    {% else %}<li class="empty">Aucune tâche en cours.</li>{% endfor %}
+  </ul>
+</section>
+
+{% if done %}
+<details class="card">
+  <summary><strong>Terminées</strong> <span class="muted">({{ done|length }})</span></summary>
+  <ul class="rows">
+    {% for t in done %}<li><a href="/tasks/{{ t.id }}" class="grow">{{ t.title }}</a><span class="small muted">{{ t.matter.name }}</span></li>{% endfor %}
+  </ul>
+</details>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,95 @@
+{% macro status(item) -%}
+  {# Dossier (a une référence) ou tâche #}
+  {% set names = labels.MATTER_STATUS if item.reference is defined else labels.TASK_STATUS %}
+  <span class="badge {{ item.status }}">{{ names[item.status] }}</span>
+{%- endmacro %}
+
+{% macro deadline(task, now) -%}
+  {% set days = (task.deadline - now).days %}
+  {% set finished = task.status in ('done', 'closed') %}
+  {% if not finished and task.deadline < now %}
+    <span class="badge late">En retard ({{ task.deadline|dt('%d/%m') }})</span>
+  {% else %}
+    <span class="nowrap">{{ task.deadline|dt('%d/%m %Hh%M') }}{% if not finished %} <span class="muted">(J-{{ days }})</span>{% endif %}</span>
+  {% endif %}
+{%- endmacro %}
+
+{% macro budget_bar(b) -%}
+  <div class="bar {% if b.pct >= 100 %}over{% elif b.pct >= 80 %}warn{% endif %}" title="{{ b.hours }} h / {{ b.estimated_hours }} h">
+    <span style="width: {{ [b.pct, 100]|min }}%"></span>
+  </div>
+  <span class="small muted">{{ b.hours }} h / {{ b.estimated_hours }} h ({{ b.pct }} %)</span>
+{%- endmacro %}
+
+{% macro agenda(days) -%}
+  <div class="agenda">
+    <div class="agenda-hours"><span></span><div class="scale"><span>8h</span><span>11h</span><span>14h</span><span>17h</span><span>20h</span></div></div>
+    {% for d in days %}
+      <div class="agenda-day {% if d.is_deadline %}deadline{% endif %}">
+        <span class="day">{{ d.date|day }}{% if d.is_deadline %} ⚑{% endif %}</span>
+        <div class="agenda-track">
+          {% for it in d['items'] %}
+            <span class="ev {{ it.event.kind }}" style="left: {{ it.left }}%; width: {{ it.width }}%"
+                  title="{{ labels.EVENT_KIND[it.event.kind] }} · {{ it.event.title }} · {{ it.event.start.strftime('%Hh%M') }}–{{ it.event.end.strftime('%Hh%M') }}">{{ it.event.title }}</span>
+          {% endfor %}
+        </div>
+      </div>
+    {% else %}
+      <p class="empty">Aucun jour ouvré sur la période.</p>
+    {% endfor %}
+  </div>
+  <div class="legend">
+    <span><i style="background: var(--ok-bg); border: 1px solid var(--border)"></i>Libre</span>
+    {% for k, v in labels.EVENT_KIND.items() %}<span><i class="ev {{ k }}" style="position: static; display: inline-block"></i>{{ v }}</span>{% endfor %}
+  </div>
+{%- endmacro %}
+
+{% macro timeline(events) -%}
+  <ul class="timeline">
+    {% for e in events|reverse %}
+      <li class="{{ e.kind }}"><div>{{ e.message }}</div><div class="when">{{ e.created_at|dt }}</div></li>
+    {% else %}
+      <li>Aucun événement.</li>
+    {% endfor %}
+  </ul>
+{%- endmacro %}
+
+{% macro criteria_table(c) -%}
+  {% for tier, title in [('main', 'Critères principaux'), ('complementary', 'Critères complémentaires')] %}
+    <table class="criteria">
+      <thead><tr><th colspan="3">{{ title }}</th></tr></thead>
+      <tbody>
+        {% for cr in c.criteria if cr.tier == tier %}
+          <tr class="{% if cr.value is none %}na{% endif %}">
+            <td class="rank">{{ cr.rank }}</td>
+            <td>{{ cr.label }}<div class="small muted">{{ cr.detail }}</div></td>
+            <td class="num" style="width: 90px">
+              {% if cr.value is none %}<span class="muted small">sans objet</span>
+              {% else %}<div class="bar {% if cr.value < 0.34 %}over{% elif cr.value < 0.67 %}warn{% endif %}"><span style="width: {{ (cr.value * 100)|round }}%"></span></div>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endfor %}
+{%- endmacro %}
+
+{% macro assistant(url, suggestions, pool) -%}
+  <button type="button" class="assistant-toggle" id="assistant-toggle" aria-controls="assistant-panel">💬 Assistant</button>
+  <section class="assistant-panel" id="assistant-panel" hidden
+           data-url="{{ url }}" data-suggestions='{{ suggestions|tojson|forceescape }}'>
+    <header>
+      <div>
+        <strong>Assistant d'attribution</strong>
+        <div class="small muted">Pourquoi ce {{ 'collaborateur' if pool == Role.ASSOCIATE else 'stagiaire' }} ? Posez votre question.</div>
+      </div>
+      <button type="button" class="btn small" id="assistant-close" aria-label="Fermer">✕</button>
+    </header>
+    <div class="assistant-messages" id="assistant-messages" aria-live="polite"></div>
+    <div class="assistant-suggestions" id="assistant-suggestions"></div>
+    <form id="assistant-form" class="assistant-form">
+      <input id="assistant-input" placeholder="Ex. Pourquoi Sarah plutôt que Camille ?" autocomplete="off" aria-label="Votre question">
+      <button class="btn primary">Envoyer</button>
+    </form>
+  </section>
+{%- endmacro %}

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "macros.html" import budget_bar, status %}
+{% block title %}Facturation{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Facturation</h1>
+    <p class="muted">Temps validés par dossier, budgets des tâches et pré-factures. Honoraires au temps passé uniquement (prototype).</p>
+  </div>
+</div>
+
+<section class="card table-wrap">
+  <h2>Par dossier</h2>
+  <table>
+    <thead><tr><th>Dossier</th><th class="num">Heures saisies</th><th class="num">Dont non fact.</th><th class="num">Brouillons</th><th class="num">Prêt à facturer</th><th class="num">Déjà facturé</th><th class="num">Réductions</th><th></th></tr></thead>
+    <tbody>
+      {% for r in overview %}
+        <tr>
+          <td><strong>{{ r.matter.reference }}</strong> {{ r.matter.name }}<div class="small muted">{{ r.matter.client.name }}</div></td>
+          <td class="num">{{ r.hours_total }}</td>
+          <td class="num">{{ r.hours_non_billable }}</td>
+          <td class="num">{% if r.draft_count %}<span class="badge pending" title="Saisies non encore validées par leurs auteurs">{{ r.draft_count }}</span>{% else %}0{% endif %}</td>
+          <td class="num"><strong>{{ r.ready_amount|money }}</strong><div class="small muted">{{ r.ready_count }} saisie(s)</div></td>
+          <td class="num">{{ r.invoiced|money }}</td>
+          <td class="num">{{ r.write_off|money }}</td>
+          <td>
+            {% if r.ready_count %}
+              <form method="post" action="/pre-invoices"><input type="hidden" name="matter_id" value="{{ r.matter.id }}"><button class="btn small primary">Préparer la pré-facture</button></form>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}<tr><td colspan="8" class="empty">Aucun temps saisi.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<div class="grid grid-2" style="margin-top: 1rem">
+  <section class="card table-wrap">
+    <h2>Budgets des tâches</h2>
+    <table>
+      <thead><tr><th>Tâche</th><th>Statut</th><th>Consommé</th></tr></thead>
+      <tbody>
+        {% for t, b in budgets %}
+          <tr><td><a href="/tasks/{{ t.id }}">{{ t.title }}</a><div class="small muted">{{ t.assignee.name if t.assignee }}</div></td><td>{{ status(t) }}</td><td style="min-width: 160px">{{ budget_bar(b) }}</td></tr>
+        {% else %}<tr><td colspan="3" class="empty">Aucune tâche.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Pré-factures</h2>
+    <ul class="task-list">
+      {% for i in invoices %}
+        <li>
+          <div><a href="/pre-invoices/{{ i.id }}"><strong>{{ i.matter.reference }} · {{ i.matter.name }}</strong></a><div class="meta">{{ i.created_at|dt('%d/%m/%Y') }} · {{ i.lines|length }} ligne(s)</div></div>
+          <div class="actions"><strong>{{ i.total|money }}</strong><span class="badge {% if i.status == 'validated' %}done{% else %}pending{% endif %}">{{ 'Validée' if i.status == 'validated' else 'Brouillon' }}</span></div>
+        </li>
+      {% else %}<li class="empty">Aucune pré-facture.</li>{% endfor %}
+    </ul>
+  </section>
+</div>
+{% endblock %}

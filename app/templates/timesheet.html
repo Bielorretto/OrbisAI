@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Mes temps{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Mes temps</h1>
+    <p class="subtitle">Aujourd'hui : {{ today_minutes|hm }}</p>
+  </div>
+  {% if drafts %}
+    <form method="post" action="/time-entries/validate"><button class="btn primary">Valider mes {{ drafts }} saisie(s)</button></form>
+  {% endif %}
+</div>
+
+{% if timer %}
+  <section class="card highlight">
+    <h2>⏱ {{ timer.task.title }}</h2>
+    <form method="post" action="/timer/stop" class="timer-box">
+      <span class="elapsed" data-since="{{ timer.started_at.isoformat() }}" data-now="{{ now.isoformat() }}">…</span>
+      <input type="hidden" name="entry_id" value="{{ timer.id }}">
+      <input name="note" placeholder="Qu'avez-vous fait ?" style="flex: 1; min-width: 200px">
+      <button class="btn primary">Arrêter</button>
+    </form>
+  </section>
+{% endif %}
+
+<section class="card">
+  <h2>Ajouter du temps</h2>
+  {% for s in suggestions %}
+    <form method="post" action="/time-entries" class="actions suggestion">
+      <input type="hidden" name="task_id" value="{{ s.task.id }}">
+      <span class="grow"><strong>{{ s.task.title }}</strong>{% if s.minutes %} <span class="small muted">· d'après votre agenda</span>{% endif %}</span>
+      <input type="number" name="hours" min="0" step="0.1" value="{{ (s.minutes / 60)|round(1) }}" style="width: 5.5rem" aria-label="Heures">
+      <input name="note" placeholder="Qu'avez-vous fait ?" style="width: 240px" aria-label="Note">
+      <button class="btn">Ajouter</button>
+    </form>
+  {% endfor %}
+  {% if loggable %}
+    <form method="post" action="/time-entries" class="actions" style="margin-top: .75rem">
+      <select name="task_id" style="flex: 1; min-width: 200px" aria-label="Tâche">{% for t in loggable %}<option value="{{ t.id }}">{{ t.title }}</option>{% endfor %}</select>
+      <input type="number" name="hours" min="0" step="0.1" value="1" style="width: 5.5rem" aria-label="Heures">
+      <input name="note" placeholder="Qu'avez-vous fait ?" style="width: 240px" aria-label="Note">
+      <button class="btn">Ajouter</button>
+    </form>
+    <p class="small muted" style="margin-bottom: 0">L'IA rédige le libellé de facturation à partir de votre note. Durées arrondies aux 6 minutes.</p>
+  {% else %}<p class="empty">Aucune tâche en cours.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Mes saisies</h2>
+  <ul class="rows">
+    {% for e in entries if not e.running %}
+      <li>
+        <span class="small muted nowrap">{{ e.work_date.strftime('%d/%m') }}</span>
+        {% if e.status == 'draft' %}
+          <form method="post" action="/time-entries/{{ e.id }}" class="actions grow">
+            <input name="label" value="{{ e.label }}" style="flex: 1; min-width: 200px" aria-label="Libellé">
+            <input type="number" name="hours" step="0.1" min="0.1" value="{{ e.hours }}" style="width: 5rem" aria-label="Heures">
+            <button class="btn small">OK</button>
+          </form>
+          <form method="post" action="/time-entries/{{ e.id }}/delete"><button class="btn small" title="Supprimer">✕</button></form>
+        {% else %}
+          <span class="grow">{{ e.label }} <span class="small muted">— {{ e.task.title }}</span></span>
+          <span class="nowrap">{{ e.minutes|hm }}</span>
+          <span class="tag">{{ labels.TIME_STATUS[e.status] }}</span>
+        {% endif %}
+      </li>
+    {% else %}<li class="empty">Aucune saisie.</li>{% endfor %}
+  </ul>
+</section>
+{% endblock %}

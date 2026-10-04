@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Pré-facture {{ invoice.matter.reference }}{% endblock %}
+{% block content %}
+{% set draft = invoice.status == 'draft' %}
+<div class="page-head">
+  <div>
+    <div class="small muted no-print"><a href="/billing">← Facturation</a></div>
+    <h1>Pré-facture · {{ invoice.matter.reference }}</h1>
+    <p class="muted" style="margin: 0">{{ invoice.matter.client.name }} · {{ invoice.matter.name }} · créée le {{ invoice.created_at|dt('%d/%m/%Y') }}
+      {% if not draft %}· validée le {{ invoice.validated_at|dt('%d/%m/%Y') }}{% endif %}</p>
+  </div>
+  <div class="actions no-print">
+    <a class="btn" href="/pre-invoices/{{ invoice.id }}/export.csv">Export CSV</a>
+    <button class="btn" type="button" onclick="window.print()">Imprimer / PDF</button>
+  </div>
+</div>
+
+{% if draft %}
+  <div class="notice no-print">Brouillon : ajustez les libellés et les réductions, puis validez. La validation marque les temps comme facturés.</div>
+{% endif %}
+
+<form class="card table-wrap" method="post" action="/pre-invoices/{{ invoice.id }}">
+  <table>
+    <thead><tr><th>Date</th><th>Intervenant</th><th>Libellé</th><th class="num">Heures</th><th class="num">Taux HT</th><th class="num">Réduction</th><th class="num">Montant HT</th></tr></thead>
+    <tbody>
+      {% for l in invoice.lines %}
+        <tr>
+          <td class="nowrap">{{ l.work_date.strftime('%d/%m/%Y') }}</td>
+          <td class="nowrap">{{ l.user_name }}</td>
+          <td>{% if draft %}<input name="label_{{ l.id }}" value="{{ l.label }}">{% else %}{{ l.label }}{% endif %}</td>
+          <td class="num">{{ '%.2f'|format(l.hours) }}</td>
+          <td class="num">{{ l.rate|money }}</td>
+          <td class="num">{% if draft %}<input type="number" name="write_off_pct_{{ l.id }}" min="0" max="100" step="5" value="{{ l.write_off_pct|round|int }}" style="width: 4.5rem"> %{% else %}{{ l.write_off_pct|round|int }} %{% endif %}</td>
+          <td class="num">{{ l.amount|money }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr><td colspan="6" class="num">Total brut HT</td><td class="num">{{ invoice.total_before_write_off|money }}</td></tr>
+      <tr><td colspan="6" class="num">Réductions</td><td class="num">− {{ (invoice.total_before_write_off - invoice.total)|money }}</td></tr>
+      <tr><td colspan="6" class="num"><strong>Total HT</strong></td><td class="num"><strong>{{ invoice.total|money }}</strong></td></tr>
+    </tfoot>
+  </table>
+  {% if draft %}
+    <div class="actions no-print" style="margin-top: 1rem">
+      <button class="btn" name="action" value="save">Enregistrer</button>
+      <button class="btn primary" name="action" value="validate" onclick="return confirm('Valider la pré-facture ? Les temps seront marqués comme facturés.')">Valider la pré-facture</button>
+    </div>
+  {% endif %}
+</form>
+{% if draft %}
+  <form method="post" action="/pre-invoices/{{ invoice.id }}/delete" class="no-print" style="margin-top: .75rem">
+    <button class="btn danger small">Supprimer le brouillon</button>
+  </form>
+{% endif %}
+<p class="small muted">Document de travail interne : la facture définitive (numérotation, TVA, mentions légales) est émise par le logiciel de facturation du cabinet.</p>
+{% endblock %}

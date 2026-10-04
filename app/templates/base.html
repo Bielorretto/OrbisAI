@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Loickaton{% endblock %} · Loickaton</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+{% if user %}
+<header class="topbar">
+  <a class="brand" href="/">Loick<span>aton</span></a>
+  <nav class="nav">
+    {% if user.is_assigner %}
+      <a href="/">Mes dossiers</a>
+      <a href="/matters/new">Nouveau dossier</a>
+      <a href="/billing">Facturation</a>
+    {% elif user.role == Role.ASSOCIATE %}
+      <a href="/">Mes dossiers</a>
+      <a href="/timesheet">Mes temps</a>
+    {% else %}
+      <a href="/">Mes tâches</a>
+      <a href="/timesheet">Mes temps</a>
+    {% endif %}
+  </nav>
+  <span class="spacer"></span>
+  {% if timer %}
+    <a class="pill" href="/timesheet" title="Chronomètre en cours">⏱ <span data-since="{{ timer.started_at.isoformat() }}" data-now="{{ now.isoformat() }}">…</span></a>
+  {% endif %}
+  <a class="bell" href="/notifications" title="Notifications">🔔{% if unread %}<span class="count">{{ unread }}</span>{% endif %}</a>
+  <span class="who">{{ user.name }} <span class="muted">· {{ labels.ROLE[user.role] }}</span></span>
+  <a class="small muted" href="/logout">Changer de profil</a>
+</header>
+{% endif %}
+<main>
+  {% if flash %}<div class="flash {% if flash_error %}error{% endif %}">{{ flash }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+{% if user %}
+<footer class="footer">
+  <a href="/demo">Outils de démo</a> · IA : {% if ai_status.using_mistral %}Mistral{% else %}mode simulé{% endif %}
+  · {{ now|day(true) }}
+</footer>
+{% endif %}
+<script src="/static/app.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

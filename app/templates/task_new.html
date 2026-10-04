@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Nouvelle tâche · {{ matter.name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <a class="small muted" href="/matters/{{ matter.id }}">← {{ matter.name }}</a>
+    <h1>Nouvelle tâche</h1>
+  </div>
+</div>
+<form class="card form-simple" method="post" action="/matters/{{ matter.id }}/tasks">
+  <div class="field">
+    <label for="title">Tâche</label>
+    <input id="title" name="title" required placeholder="Ex. Rédiger les conclusions en réponse">
+  </div>
+  <div class="row">
+    <div class="field">
+      <label for="deadline">Pour quand ?</label>
+      <input id="deadline" type="datetime-local" name="deadline" required
+             value="{{ (matter.deadline if matter.deadline > now else now).strftime('%Y-%m-%dT%H:%M') }}">
+    </div>
+    <div class="field">
+      <label for="estimated_hours">Temps estimé (h)</label>
+      <input id="estimated_hours" type="number" name="estimated_hours" min="0.5" step="0.5" value="4" required>
+    </div>
+  </div>
+  <div class="field">
+    <label for="description">Description <span class="muted">(facultatif)</span></label>
+    <textarea id="description" name="description" placeholder="Ce qu'il faut produire, les pièces utiles…"></textarea>
+  </div>
+  <div class="actions" style="margin-bottom: 1rem">
+    <button type="button" class="btn" id="analyze">✨ Estimer avec l'IA</button>
+    <span class="small muted" id="analyze-status"></span>
+  </div>
+  <div class="notice" id="analysis" hidden></div>
+  <input type="hidden" name="ai_summary" id="ai_summary">
+
+  <details class="field">
+    <summary class="small">Plus d'options</summary>
+    <div class="row" style="margin-top: .75rem">
+      <div class="field">
+        <label for="specialty_id">Domaine</label>
+        <select id="specialty_id" name="specialty_id">
+          <option value="">— Celui du dossier —</option>
+          {% for s in specialties %}<option value="{{ s.id }}" {% if s.id == matter.specialty_id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="sub_specialty_id">Sous-spécialité</label>
+        <select id="sub_specialty_id" name="sub_specialty_id">
+          <option value="">— Aucune —</option>
+          {% for x in subs %}<option value="{{ x.id }}" data-domain="{{ x.specialty_id }}" {% if x.id == matter.sub_specialty_id %}selected{% endif %}>{{ x.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="task_type">Type de travail</label>
+        <select id="task_type" name="task_type">
+          <option value="">— Non précisé —</option>
+          {% for k, v in task_types.items() %}<option value="{{ k }}">{{ v[0] }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="complexity">Complexité</label>
+        <select id="complexity" name="complexity">
+          {% for k, v in labels.COMPLEXITY.items() %}<option value="{{ k }}" {% if k == matter.complexity %}selected{% endif %}>{{ v }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="min_level">Peut être confiée à un stagiaire ?</label>
+        <select id="min_level" name="min_level">
+          <option value="{{ Role.INTERN }}">Oui</option>
+          <option value="{{ Role.ASSOCIATE }}">Non</option>
+        </select>
+      </div>
+      <div class="field"><label for="required_language">Langue obligatoire</label><input id="required_language" name="required_language"></div>
+    </div>
+  </details>
+  <div class="actions">
+    <button class="btn primary" name="next_step" value="myself">Créer — je la fais</button>
+    <button class="btn" name="next_step" value="delegate">Créer — la confier à un stagiaire</button>
+  </div>
+</form>
+{% endblock %}
+{% block scripts %}
+<script>initAnalysisForm("/tasks/analyze", "title", 3);</script>
+{% endblock %}

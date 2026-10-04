@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% from "macros.html" import criteria_table, assistant %}
+{% block title %}Attribuer · {{ matter.name }}{% endblock %}
+{% block content %}
+{% set eligible = candidates|rejectattr('eliminated')|list %}
+{% set excluded = candidates|selectattr('eliminated')|list %}
+<div class="page-head">
+  <div>
+    <a class="small muted" href="/matters/{{ matter.id }}">← {{ matter.name }}</a>
+    <h1>Collaborateur</h1>
+  </div>
+</div>
+
+{% if matter.status == 'cascade_failed' %}
+  <div class="notice warn">Personne n'a accepté la première sélection : choisissez à nouveau.</div>
+{% endif %}
+
+<div class="layout-side">
+  <section>
+    {% for c in eligible %}
+      <article class="candidate" data-id="{{ c.user.id }}" data-name="{{ c.user.name }}">
+        <div class="rank">{{ loop.index }}</div>
+        <div>
+          <a href="#" class="name" data-panel="/people/{{ c.user.id }}/panel?matter_id={{ matter.id }}">{{ c.user.name }}</a>
+          {% if c.user.id in refused %}<span class="tag">déjà sollicité</span>{% endif %}
+          <div class="why">{{ c.explanation }}</div>
+          <details class="small"><summary class="muted">Détails</summary>
+            <p class="small muted" style="margin: .4rem 0 0">Coût estimé {{ c.estimated_cost|money }} HT · fin estimée {{ c.estimated_finish|day(true) if c.estimated_finish else 'au-delà de 45 jours' }}</p>
+            {{ criteria_table(c) }}
+          </details>
+        </div>
+        <div class="pick">
+          <div class="score">{{ c.score|round|int }}</div>
+          <button type="button" class="btn small primary add" data-score="{{ c.score }}">Ajouter</button>
+        </div>
+      </article>
+    {% else %}
+      <p class="empty">Aucun collaborateur disponible pour ce dossier.</p>
+    {% endfor %}
+
+    {% if excluded %}
+      <details class="excluded">
+        <summary>Non disponibles ({{ excluded|length }})</summary>
+        <ul class="rows">
+          {% for c in excluded %}<li><span class="grow">{{ c.user.name }}</span><span class="small muted">{{ c.eliminated }}</span></li>{% endfor %}
+        </ul>
+      </details>
+    {% endif %}
+  </section>
+
+  <aside class="sticky">
+    <form class="card" method="post" action="/matters/{{ matter.id }}/assign" id="selection-form">
+      <h2>Votre choix</h2>
+      <p class="small muted" style="margin-top: 0">Envoyé dans cet ordre : si le 1er refuse, le dossier passe au suivant.</p>
+      <ol class="selection-list" id="selection"></ol>
+      <p class="empty" id="selection-empty">Ajoutez {{ min_choices }} collaborateur{{ 's' if min_choices > 1 }}.</p>
+      <div id="selection-inputs"></div>
+      <button class="btn primary" id="validate" disabled style="width: 100%; justify-content: center">Envoyer</button>
+      <p class="small muted" id="selection-count" style="text-align: center; margin-bottom: 0"></p>
+    </form>
+  </aside>
+</div>
+
+<div class="drawer-backdrop" id="drawer-backdrop"></div>
+<aside class="drawer" id="drawer" aria-live="polite"></aside>
+{{ assistant("/matters/" ~ matter.id ~ "/assistant", assistant_suggestions, Role.ASSOCIATE) }}
+{% endblock %}
+{% block scripts %}
+<script>
+  initSelection({{ min_choices }});
+</script>
+{% endblock %}

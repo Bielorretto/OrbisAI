@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% from "macros.html" import status, deadline, timeline, assistant %}
+{% block title %}{{ task.title }}{% endblock %}
+{% block content %}
+{% set i_work = task.status == 'in_progress' and (task.delegate_id == user.id or (task.assignee_id == user.id and not task.delegate_id)) %}
+<div class="page-head">
+  <div>
+    <a class="small muted" href="/matters/{{ task.matter.id }}">← {{ task.matter.name }}</a>
+    <h1>{{ task.title }}</h1>
+    <div class="facts-line">
+      <span>{{ status(task) }} {% if is_late %}<span class="badge late">En retard</span>{% endif %}</span>
+      <span>Deadline <strong>{{ deadline(task, now) }}</strong></span>
+      <span>Effort <strong>{{ task.estimated_hours|round(1) }} h</strong></span>
+      {% if task.delegate %}<span>Stagiaire <strong>{{ task.delegate.name }}</strong></span>
+      {% else %}<span>Collaborateur <strong>{{ task.assignee.name }}</strong></span>{% endif %}
+    </div>
+  </div>
+</div>
+
+{# ---------- Une seule action, selon la personne et l'état ---------- #}
+{% if task.assignee_id == user.id and task.status == 'accepted' %}
+  <section class="card highlight">
+    <h2>Qui fait cette tâche ?</h2>
+    <div class="actions">
+      <form method="post" action="/tasks/{{ task.id }}/work-myself"><button class="btn primary">Je la fais</button></form>
+      <a class="btn" href="/tasks/{{ task.id }}/delegate">Confier à un stagiaire</a>
+    </div>
+  </section>
+{% elif delegation and delegation.to_user_id == user.id %}
+  <section class="card highlight">
+    <h2>{{ delegation.from_user.name }} vous confie cette tâche</h2>
+    <div class="actions">
+      <form method="post" action="/delegations/{{ delegation.id }}/accept"><button class="btn ok">Accepter</button></form>
+      <form method="post" action="/delegations/{{ delegation.id }}/refuse" class="actions">
+        <select name="reason" aria-label="Motif du refus" style="width: auto">
+          {% for k, v in labels.REFUSAL_REASONS.items() if k != 'conflict' %}<option value="{{ k }}">{{ v }}</option>{% endfor %}
+        </select>
+        <button class="btn">Refuser</button>
+      </form>
+    </div>
+  </section>
+{% elif task.status == 'in_review' and task.assignee_id == user.id %}
+  <section class="card highlight">
+    <h2>À relire : travail de {{ task.delegate.name }}</h2>
+    <div class="actions" style="align-items: flex-start">
+      <form method="post" action="/tasks/{{ task.id }}/approve"><button class="btn ok">Valider</button></form>
+      <form method="post" action="/tasks/{{ task.id }}/request-changes" class="actions" style="flex: 1; min-width: 260px">
+        <input name="comment" placeholder="Corrections à apporter" style="flex: 1">
+        <button class="btn">Demander des corrections</button>
+      </form>
+    </div>
+  </section>
+{% elif i_work %}
+  <section class="card highlight">
+    {% if timer and timer.task_id == task.id %}
+      <form method="post" action="/timer/stop" class="timer-box">
+        <span class="elapsed" data-since="{{ timer.started_at.isoformat() }}" data-now="{{ now.isoformat() }}">…</span>
+        <input type="hidden" name="entry_id" value="{{ timer.id }}">
+        <input type="hidden" name="next" value="/tasks/{{ task.id }}">
+        <input name="note" placeholder="Qu'avez-vous fait ?" style="flex: 1; min-width: 200px">
+        <button class="btn primary">Arrêter</button>
+      </form>
+    {% else %}
+      <div class="actions">
+        <form method="post" action="/timer/start"><input type="hidden" name="task_id" value="{{ task.id }}"><input type="hidden" name="next" value="/tasks/{{ task.id }}"><button class="btn">⏱ Démarrer le chrono</button></form>
+        {% if task.delegate_id == user.id %}
+          <form method="post" action="/tasks/{{ task.id }}/submit-review"><button class="btn primary">J'ai terminé</button></form>
+        {% else %}
+          <form method="post" action="/tasks/{{ task.id }}/complete"><button class="btn primary">Terminer la tâche</button></form>
+        {% endif %}
+      </div>
+    {% endif %}
+  </section>
+{% endif %}
+
+{% if task.description %}
+  <section class="card">
+    <h2>Description</h2>
+    <p style="white-space: pre-line; margin: 0">{{ task.description }}</p>
+  </section>
+{% endif %}
+
+{% if show_time %}
+  <section class="card">
+    <h2>Temps passé <span class="small muted" style="font-weight: 400">· {{ budget.hours }} h sur {{ budget.estimated_hours }} h</span></h2>
+    {% if can_log %}
+      <form method="post" action="/time-entries" class="actions" style="margin-bottom: .5rem">
+        <input type="hidden" name="task_id" value="{{ task.id }}">
+        <input type="hidden" name="next" value="/tasks/{{ task.id }}">
+        <input type="number" name="hours" min="0" step="0.1" value="1" style="width: 5.5rem" aria-label="Heures">
+        <input name="note" placeholder="Qu'avez-vous fait ?" style="flex: 1; min-width: 200px" aria-label="Note">
+        <button class="btn">Ajouter</button>
+      </form>
+    {% endif %}
+    <ul class="rows">
+      {% for e in entries if not e.running %}
+        <li>
+          <span class="small muted nowrap">{{ e.work_date.strftime('%d/%m') }}</span>
+          <span class="grow">{{ e.label }} <span class="small muted">— {{ e.user.name }}</span></span>
+          <span class="nowrap">{{ e.minutes|hm }}</span>
+        </li>
+      {% else %}<li class="empty">Aucun temps saisi.</li>{% endfor %}
+    </ul>
+  </section>
+{% endif %}
+
+<details class="card">
+  <summary><strong>Historique</strong></summary>
+  <div style="margin-top: .75rem">{{ timeline(task.events) }}</div>
+</details>
+
+{% if assistant_pool and task.status == 'accepted' %}
+  {{ assistant("/tasks/" ~ task.id ~ "/assistant", ["Quel stagiaire est le meilleur choix ?", "Qui est exclu et pourquoi ?"], assistant_pool) }}
+{% endif %}
+{% endblock %}

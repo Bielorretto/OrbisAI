@@ -1,0 +1,37 @@
+{% from "macros.html" import agenda %}
+{% if not standalone %}<button type="button" class="btn small close" data-close>✕ Fermer</button>{% endif %}
+<h2 style="margin-bottom: .25rem">{{ person.name }}</h2>
+<p class="muted small" style="margin-top: 0">
+  {{ labels.ROLE[person.role] }}{% if person.bar_year %} · prestation de serment {{ person.bar_year }} ({{ years }} ans){% endif %}
+  · {{ person.hourly_rate|money }}/h
+</p>
+<p>{{ person.bio }}</p>
+<dl class="info">
+  <dt>Spécialités</dt>
+  <dd>{% for us in person.specialties %}<span class="badge tag">{{ us.specialty.name }} · {{ labels.SPECIALTY_LEVEL[us.level] }}</span> {% endfor %}</dd>
+  {% if person.sub_specialties %}
+    <dt>Sous-spécialités</dt>
+    <dd>{% for us in person.sub_specialties %}<span class="badge tag">{{ us.sub_specialty.name }} · {{ labels.SPECIALTY_LEVEL[us.level] }} · {{ us.cases_count }} dossiers</span> {% endfor %}</dd>
+  {% endif %}
+  <dt>Langues</dt><dd>{{ person.languages }}</dd>
+  {% if person.sectors %}<dt>Secteurs</dt><dd>{{ person.sectors }}</dd>{% endif %}
+  <dt>Pays</dt><dd>{{ person.countries }}</dd>
+  <dt>Systèmes juridiques</dt><dd>{{ person.legal_systems }}</dd>
+  {% if person.jurisdictions %}<dt>Juridictions</dt><dd>{{ person.jurisdictions }}</dd>{% endif %}
+  <dt>Expérience</dt><dd>contentieuse {{ person.litigation_level }}/3 · transactionnelle {{ person.transactional_level }}/3 · internationale {{ person.international_level }}/2</dd>
+  {% if person.joined_year %}<dt>Au cabinet</dt><dd>depuis {{ person.joined_year }}</dd>{% endif %}
+  {% if person.preferences %}<dt>Préférences</dt><dd>{{ person.preferences }}</dd>{% endif %}
+  <dt>Email</dt><dd>{{ person.email }}</dd>
+  <dt>Capacité</dt><dd>{{ person.weekly_capacity_hours|round|int }} h / semaine</dd>
+  <dt>En cours</dt>
+  <dd>
+    {% for t in active %}<div class="small">{{ t.title }} <span class="muted">(deadline {{ t.deadline|dt('%d/%m') }}, {{ t.estimated_hours|round(1) }} h)</span></div>
+    {% else %}<span class="muted small">Aucune tâche en cours</span>{% endfor %}
+  </dd>
+  {% if conflicts %}
+    <dt>Conflits</dt>
+    <dd>{% for c in conflicts %}<div class="small" style="color: var(--danger)">{{ c.client.name }} : {{ c.reason }}</div>{% endfor %}</dd>
+  {% endif %}
+</dl>
+<h3 style="margin-top: 1rem">Agenda {% if task %}jusqu'à la deadline{% else %}des 2 prochaines semaines{% endif %}</h3>
+{{ agenda(days) }}

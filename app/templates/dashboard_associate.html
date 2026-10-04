@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% from "macros.html" import deadline %}
+{% block title %}Mes dossiers{% endblock %}
+{% block content %}
+<div class="page-head"><h1>Bonjour {{ user.name.split(' ')[0] }}</h1></div>
+
+{% if proposals %}
+<section class="card highlight">
+  <h2>On vous propose {{ 'un dossier' if proposals|length == 1 else proposals|length ~ ' dossiers' }}</h2>
+  <ul class="rows">
+    {% for p in proposals %}
+      <li>
+        <div class="grow">
+          <a href="/matters/{{ p.matter.id }}" class="row-title">{{ p.matter.name }}</a>
+          <div class="row-meta">{{ p.matter.created_by.name }} · échéance {{ deadline(p.matter, now) }} · répondre avant {{ p.expires_at|dt('%d/%m %Hh%M') }}</div>
+        </div>
+        <form method="post" action="/proposals/{{ p.id }}/accept"><button class="btn ok">Accepter</button></form>
+        <a class="btn" href="/matters/{{ p.matter.id }}#refuser">Refuser</a>
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Mes dossiers</h2>
+  <ul class="rows">
+    {% for m, p in matters %}
+      <li>
+        <div class="grow">
+          <a href="/matters/{{ m.id }}" class="row-title">{{ m.name }}</a>
+          <div class="row-meta">{{ m.client.name }} · échéance {{ deadline(m, now) }}</div>
+        </div>
+        <a class="btn primary" href="/matters/{{ m.id }}/tasks/new">+ Tâche</a>
+      </li>
+    {% else %}<li class="empty">Aucun dossier pour l'instant.</li>{% endfor %}
+  </ul>
+</section>
+
+<section class="card">
+  <h2>Mes tâches</h2>
+  <ul class="rows">
+    {% for t in tasks %}
+      <li>
+        <div class="grow">
+          <a href="/tasks/{{ t.id }}" class="row-title">{{ t.title }}</a>
+          <div class="row-meta">{{ t.matter.name }} · {{ deadline(t, now) }}</div>
+        </div>
+        {% if t.status == 'accepted' %}
+          <form method="post" action="/tasks/{{ t.id }}/work-myself"><button class="btn primary">Je la fais</button></form>
+          <a class="btn" href="/tasks/{{ t.id }}/delegate">Déléguer</a>
+        {% elif t.status == 'delegation_pending' %}
+          {% set d = t.delegations|selectattr('status', 'equalto', 'pending')|first %}
+          <span class="tag">En attente de {{ d.to_user.name if d else 'réponse' }}</span>
+        {% elif t.status == 'in_review' %}
+          <a class="btn primary" href="/tasks/{{ t.id }}">Relire</a>
+        {% elif t.delegate %}
+          <span class="tag">Confiée à {{ t.delegate.name }}</span>
+        {% else %}
+          <form method="post" action="/timer/start"><input type="hidden" name="task_id" value="{{ t.id }}"><input type="hidden" name="next" value="/"><button class="btn">⏱ Chrono</button></form>
+          <form method="post" action="/tasks/{{ t.id }}/complete"><button class="btn">Terminer</button></form>
+        {% endif %}
+      </li>
+    {% else %}<li class="empty">Aucune tâche en cours. Créez-en une depuis un dossier.</li>{% endfor %}
+  </ul>
+</section>
+{% endblock %}

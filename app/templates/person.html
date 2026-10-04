@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ person.name }}{% endblock %}
+{% block content %}
+<div class="small muted"><a href="/people">← Équipe</a></div>
+<div class="card" style="margin-top: .5rem">
+  {% include "_person_panel.html" %}
+</div>
+{% endblock %}

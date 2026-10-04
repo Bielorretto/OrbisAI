@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Connexion{% endblock %}
+{% block content %}
+<div class="welcome">
+  <div class="brand-big">Loick<span>aton</span></div>
+
+  {% if not role %}
+    <h1>Qui êtes-vous ?</h1>
+    <div class="role-choice">
+      <a class="role-circle" href="/login?role={{ Role.PARTNER }}&next={{ next|urlencode }}">
+        <span class="icon" aria-hidden="true">⚖️</span>
+        <span>Associé</span>
+      </a>
+      <a class="role-circle" href="/login?role={{ Role.ASSOCIATE }}&next={{ next|urlencode }}">
+        <span class="icon" aria-hidden="true">💼</span>
+        <span>Collaborateur</span>
+      </a>
+      <a class="role-circle" href="/login?role={{ Role.INTERN }}&next={{ next|urlencode }}">
+        <span class="icon" aria-hidden="true">🎓</span>
+        <span>Stagiaire</span>
+      </a>
+    </div>
+  {% else %}
+    <h1>{{ labels.ROLE[role] }} : quel est votre nom ?</h1>
+    <form method="post" action="/login" class="name-form">
+      <input type="hidden" name="role" value="{{ role }}">
+      <input type="hidden" name="next" value="{{ next }}">
+      <input name="name" placeholder="Votre nom" autocomplete="off" autofocus required aria-label="Votre nom">
+      <button class="btn primary">Continuer</button>
+    </form>
+    <p class="small muted">Pour aller vite, tapez <strong>exemple</strong>.</p>
+    <a class="back-link" href="/login?next={{ next|urlencode }}">← Retour</a>
+  {% endif %}
+</div>
+{% endblock %}

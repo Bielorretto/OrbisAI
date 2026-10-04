@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Nouveau dossier{% endblock %}
+{% block content %}
+<div class="page-head"><h1>Nouveau dossier</h1></div>
+<form class="card form-simple" method="post" action="/matters">
+  <div class="field">
+    <label for="name">Intitulé</label>
+    <input id="name" name="name" required placeholder="Ex. Litige fournisseur – rupture brutale">
+  </div>
+  <div class="row">
+    <div class="field">
+      <label for="client_id">Client</label>
+      <select id="client_id" name="client_id">
+        <option value="">— Choisir —</option>
+        {% for c in clients %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="deadline">Échéance</label>
+      <input id="deadline" type="datetime-local" name="deadline" required>
+    </div>
+  </div>
+  <div class="field">
+    <label for="description">Description</label>
+    <textarea id="description" name="description" placeholder="Contexte, enjeux, ce qu'il faut faire…"></textarea>
+  </div>
+  <div class="actions" style="margin-bottom: 1rem">
+    <button type="button" class="btn" id="analyze">✨ Compléter avec l'IA</button>
+    <span class="small muted" id="analyze-status">Domaine, type et charge estimée à partir de la description.</span>
+  </div>
+  <div class="notice" id="analysis" hidden></div>
+  <input type="hidden" name="ai_summary" id="ai_summary">
+
+  <div class="row">
+    <div class="field">
+      <label for="specialty_id">Domaine</label>
+      <select id="specialty_id" name="specialty_id">
+        <option value="">— Choisir —</option>
+        {% for s in specialties %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="sub_specialty_id">Sous-spécialité</label>
+      <select id="sub_specialty_id" name="sub_specialty_id">
+        <option value="">— Aucune —</option>
+        {% for x in subs %}<option value="{{ x.id }}" data-domain="{{ x.specialty_id }}">{{ x.name }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="estimated_hours">Charge estimée (h)</label>
+      <input id="estimated_hours" type="number" name="estimated_hours" min="0.5" step="0.5" value="10" required>
+    </div>
+  </div>
+
+  <details class="field">
+    <summary class="small">Plus d'options</summary>
+    <div class="row" style="margin-top: .75rem">
+      <div class="field">
+        <label for="task_type">Type de dossier</label>
+        <select id="task_type" name="task_type">
+          <option value="">— Non précisé —</option>
+          {% for k, v in task_types.items() %}<option value="{{ k }}">{{ v[0] }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="complexity">Complexité</label>
+        <select id="complexity" name="complexity">
+          {% for k, v in labels.COMPLEXITY.items() %}<option value="{{ k }}" {% if k == 2 %}selected{% endif %}>{{ v }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="notify_days_before">Me rappeler à J-</label>
+        <input id="notify_days_before" type="number" name="notify_days_before" min="0" max="60" value="{{ default_notify }}">
+      </div>
+    </div>
+    <div class="row">
+      <div class="field"><label for="required_language">Langue obligatoire</label><input id="required_language" name="required_language" placeholder="ex. Anglais"></div>
+      <div class="field"><label for="required_jurisdiction">Juridiction obligatoire</label><input id="required_jurisdiction" name="required_jurisdiction" placeholder="ex. Versailles"></div>
+      <div class="field"><label for="country">Pays</label><input id="country" name="country" placeholder="celui du client"></div>
+    </div>
+    <p class="small muted" style="margin: 0 0 .5rem">Nouveau client (si absent de la liste)</p>
+    <div class="row">
+      <div class="field"><label for="new_client_name">Nom</label><input id="new_client_name" name="new_client_name"></div>
+      <div class="field"><label for="new_client_sector">Secteur</label><input id="new_client_sector" name="new_client_sector"></div>
+      <div class="field"><label for="new_client_language">Langue</label><input id="new_client_language" name="new_client_language" value="Français"></div>
+      <div class="field"><label for="new_client_country">Pays</label><input id="new_client_country" name="new_client_country" value="France"></div>
+    </div>
+    <input type="hidden" name="legal_system" value="">
+  </details>
+  <div class="actions"><button class="btn primary">Créer le dossier</button><a class="btn" href="/">Annuler</a></div>
+</form>
+{% endblock %}
+{% block scripts %}
+<script>initAnalysisForm("/matters/analyze", "name", 10);</script>
+{% endblock %}

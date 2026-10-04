@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Démo{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Outils de démo</h1>
+    <p class="muted">Pour montrer le flux complet sans attendre : avancer l'horloge, lancer le planificateur, réinitialiser.</p>
+  </div>
+</div>
+
+<div class="grid grid-2">
+  <section class="card">
+    <h2>Horloge de l'application</h2>
+    <p>Heure actuelle de l'app : <strong>{{ now|day(true) }}</strong>
+      {% if offset.total_seconds() %}<span class="muted small">(avance de {{ (offset.total_seconds() / 3600)|round(1) }} h sur l'heure réelle)</span>{% endif %}</p>
+    <form method="post" action="/demo/advance" class="actions">
+      {% for h, label in [(1, '+1 h'), (4, '+4 h'), (24, '+1 jour'), (72, '+3 jours'), (168, '+1 semaine')] %}
+        <button class="btn" name="hours" value="{{ h }}">{{ label }}</button>
+      {% endfor %}
+    </form>
+    <p class="small muted">Chaque avance relance le planificateur : notifications J-x, expiration des propositions (→ collaborateur suivant), rappels de deadline.</p>
+    <form method="post" action="/demo/tick"><button class="btn primary">Lancer le planificateur maintenant</button></form>
+  </section>
+
+  <section class="card">
+    <h2>IA (Mistral)</h2>
+    <dl class="info">
+      <dt>Mode</dt><dd>{{ ai_status.mode }}</dd>
+      <dt>Clé API</dt><dd>{{ 'configurée' if ai_status.has_key else 'absente' }}</dd>
+      <dt>Utilisée</dt><dd>{% if ai_status.using_mistral %}<span class="badge ok">Mistral</span>{% else %}<span class="badge pending">Mode simulé</span>{% endif %}</dd>
+      <dt>Dernière erreur</dt><dd>{{ ai_status.last_error or '—' }}</dd>
+      <dt>Appels API</dt><dd>{{ ai_status.calls }}</dd>
+      <dt>Modèles</dt><dd class="small">{{ ai_status.models.large }} · {{ ai_status.models.small }} · {{ ai_status.models.embed }}</dd>
+    </dl>
+    <p class="small muted">En mode <code>auto</code>, si l'API échoue (clé invalide, réseau), l'app bascule en mode simulé pendant 5 min puis réessaie.</p>
+  </section>
+</div>
+
+<section class="card" style="margin-top: 1rem">
+  <div class="actions" style="justify-content: space-between">
+    <h2>Boîte d'envoi des emails</h2>
+    <span class="small muted">Aucun SMTP configuré : les emails sont conservés ici.</span>
+  </div>
+  {% for e in emails %}
+    <details style="border-bottom: 1px solid var(--border); padding: .4rem 0">
+      <summary><strong>{{ e.subject }}</strong> <span class="small muted">→ {{ e.to }} · {{ e.created_at|dt }}</span></summary>
+      <pre class="email">{{ e.body }}</pre>
+    </details>
+  {% else %}<p class="empty">Aucun email.</p>{% endfor %}
+</section>
+
+<section class="card">
+  <h2>Réinitialiser</h2>
+  <p class="small muted">Recrée la base de démo (personnes, agendas, tâches) et remet l'horloge à l'heure réelle.</p>
+  <form method="post" action="/demo/reset" onsubmit="return confirm('Réinitialiser toutes les données de démo ?')"><button class="btn danger">Réinitialiser la démo</button></form>
+</section>
+{% endblock %}

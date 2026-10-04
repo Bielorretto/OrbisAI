@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% from "macros.html" import status, deadline, timeline, assistant %}
+{% block title %}{{ matter.name }}{% endblock %}
+{% block content %}
+{% set is_owner = user.id == matter.assignee_id and matter.status == 'active' %}
+<div class="page-head">
+  <div>
+    <h1>{{ matter.name }}</h1>
+    <div class="facts-line">
+      <span>{{ status(matter) }}</span>
+      <span>Client <strong>{{ matter.client.name }}</strong></span>
+      <span>Échéance <strong>{{ deadline(matter, now) }}</strong></span>
+      {% if matter.assignee %}<span>Collaborateur <strong>{{ matter.assignee.name }}</strong></span>{% endif %}
+    </div>
+  </div>
+  {% if user.id == matter.created_by_id and matter.status in ('to_assign', 'cascade_failed') %}
+    <a class="btn primary" href="/matters/{{ matter.id }}/assign">Attribuer</a>
+  {% elif is_owner %}
+    <a class="btn primary" href="/matters/{{ matter.id }}/tasks/new">+ Nouvelle tâche</a>
+  {% endif %}
+</div>
+
+{% if my_proposal %}
+  <section class="card highlight" id="refuser">
+    <h2>On vous propose ce dossier</h2>
+    <p class="small muted" style="margin-top: 0">Répondre avant le {{ my_proposal.expires_at|dt('%d/%m à %Hh%M') }}. Si vous acceptez, vous en devenez responsable.</p>
+    <div class="actions" style="align-items: flex-start">
+      <form method="post" action="/proposals/{{ my_proposal.id }}/accept"><button class="btn ok">Accepter</button></form>
+      <form method="post" action="/proposals/{{ my_proposal.id }}/refuse" class="actions">
+        <select name="reason" aria-label="Motif du refus" style="width: auto">
+          {% for k, v in labels.REFUSAL_REASONS.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}
+        </select>
+        <button class="btn">Refuser</button>
+      </form>
+    </div>
+  </section>
+{% endif %}
+
+{% if matter.status in ('active', 'closed') %}
+  <section class="card">
+    <h2>Tâches</h2>
+    <ul class="rows">
+      {% for t in matter.tasks %}
+        <li>
+          <a href="/tasks/{{ t.id }}" class="grow row-title">{{ t.title }}</a>
+          {% set pending = t.delegations|selectattr('status', 'equalto', 'pending')|first %}
+          <span class="small muted">{% if t.delegate %}{{ t.delegate.name }}{% elif pending %}{{ pending.to_user.name }} ?{% elif t.status != 'accepted' %}{{ t.assignee.name }}{% endif %}</span>
+          {{ status(t) }}
+          <span class="small muted nowrap">{{ deadline(t, now) }}</span>
+        </li>
+      {% else %}
+        <li class="empty">Aucune tâche.{% if is_owner %} Créez la première avec « + Nouvelle tâche ».{% endif %}</li>
+      {% endfor %}
+    </ul>
+    <p class="small muted" style="margin-bottom: 0">Temps passé : {{ hours }} h sur {{ matter.estimated_hours|round(1) }} h estimées ({{ pct }} %)</p>
+  </section>
+{% endif %}
+
+{% if matter.description %}
+  <section class="card">
+    <h2>Description</h2>
+    <p style="white-space: pre-line; margin: 0">{{ matter.description }}</p>
+  </section>
+{% endif %}
+
+{% if matter.proposals and user.is_assigner %}
+  <details class="card">
+    <summary><strong>Réponses des collaborateurs</strong></summary>
+    <ul class="rows">
+      {% for p in matter.proposals %}
+        <li>
+          <span class="grow">{{ p.rank }}. {{ p.user.name }}</span>
+          <span class="badge {{ p.status }}">{{ labels.PROPOSAL_STATUS[p.status] }}</span>
+          {% if p.status == 'refused' %}<span class="small muted">{{ labels.refusal(p.refusal_reason) }}</span>{% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </details>
+{% endif %}
+
+<details class="card">
+  <summary><strong>Historique</strong></summary>
+  <div style="margin-top: .75rem">{{ timeline(matter.events) }}</div>
+</details>
+
+{% if matter.status == 'active' and user.id in (matter.assignee_id, matter.created_by_id) %}
+  <form method="post" action="/matters/{{ matter.id }}/close" onsubmit="return confirm('Clôturer ce dossier ?')">
+    <button class="btn small">Clôturer le dossier</button>
+  </form>
+{% endif %}
+
+{% if assistant_pool and matter.status in ('to_assign', 'cascade_failed', 'proposing') %}
+  {{ assistant("/matters/" ~ matter.id ~ "/assistant", ["Quel collaborateur est le meilleur choix ?", "Qui est exclu et pourquoi ?"], assistant_pool) }}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Équipe{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Équipe</h1><p class="muted">Les profils stockés dans la base, utilisés par le matching.</p></div></div>
+<section class="card table-wrap">
+  <table>
+    <thead><tr><th>Nom</th><th>Rôle</th><th>Spécialités</th><th class="num">Barreau</th><th class="num">Taux</th><th class="num">En cours</th></tr></thead>
+    <tbody>
+      {% for p in persons %}
+        <tr>
+          <td><a href="/people/{{ p.id }}">{{ p.name }}</a><div class="small muted">{{ p.languages }}</div></td>
+          <td>{{ labels.ROLE[p.role] }}</td>
+          <td>{% for us in p.specialties %}<span class="badge tag">{{ us.specialty.name }} · {{ labels.SPECIALTY_LEVEL[us.level] }}</span> {% endfor %}</td>
+          <td class="num">{{ p.bar_year or '—' }}</td>
+          <td class="num">{{ p.hourly_rate|money }}</td>
+          <td class="num">{{ load[p.id] }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

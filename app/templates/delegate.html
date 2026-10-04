@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% from "macros.html" import criteria_table, assistant %}
+{% block title %}Déléguer · {{ task.title }}{% endblock %}
+{% block content %}
+{% set eligible = candidates|rejectattr('eliminated')|list %}
+{% set excluded = candidates|selectattr('eliminated')|list %}
+<div class="page-head">
+  <div>
+    <a class="small muted" href="/tasks/{{ task.id }}">← {{ task.title }}</a>
+    <h1>Stagiaire</h1>
+  </div>
+  <form method="post" action="/tasks/{{ task.id }}/work-myself"><button class="btn">Je la fais moi-même</button></form>
+</div>
+
+{% for c in eligible %}
+  <article class="candidate">
+    <div class="rank">{{ loop.index }}</div>
+    <div>
+      <a href="#" class="name" data-panel="/people/{{ c.user.id }}/panel?task_id={{ task.id }}">{{ c.user.name }}</a>
+      {% if c.user.id in refused %}<span class="tag">a déjà refusé</span>{% endif %}
+      <div class="why">{{ c.explanation }}</div>
+      <details class="small"><summary class="muted">Détails</summary>
+        <p class="small muted" style="margin: .4rem 0 0">Fin estimée {{ c.estimated_finish|day(true) if c.estimated_finish else 'au-delà de 45 jours' }}</p>
+        {{ criteria_table(c) }}
+      </details>
+    </div>
+    <div class="pick">
+      <div class="score">{{ c.score|round|int }}</div>
+      <form method="post" action="/tasks/{{ task.id }}/delegate">
+        <input type="hidden" name="intern_id" value="{{ c.user.id }}">
+        <button class="btn small primary">Confier</button>
+      </form>
+    </div>
+  </article>
+{% else %}
+  <p class="empty">Aucun stagiaire disponible pour cette tâche.</p>
+{% endfor %}
+
+{% if excluded %}
+  <details class="excluded">
+    <summary>Non disponibles ({{ excluded|length }})</summary>
+    <ul class="rows">
+      {% for c in excluded %}<li><span class="grow">{{ c.user.name }}</span><span class="small muted">{{ c.eliminated }}</span></li>{% endfor %}
+    </ul>
+  </details>
+{% endif %}
+
+<div class="drawer-backdrop" id="drawer-backdrop"></div>
+<aside class="drawer" id="drawer" aria-live="polite"></aside>
+{{ assistant("/tasks/" ~ task.id ~ "/assistant", assistant_suggestions, Role.INTERN) }}
+{% endblock %}
